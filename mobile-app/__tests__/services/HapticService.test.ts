@@ -1,16 +1,8 @@
 import { HapticService } from '../../src/services/HapticService';
-import { HapticFeedback } from 'react-native-haptic-feedback';
+import { PulsePattern } from '../../src/types/pulse';
+import * as Haptics from 'expo-haptics';
 
-// Mock react-native-haptic-feedback
-jest.mock('react-native-haptic-feedback', () => ({
-  trigger: jest.fn(),
-  HapticFeedbackTypes: {
-    impactLight: 'impactLight',
-    impactMedium: 'impactMedium',
-    impactHeavy: 'impactHeavy',
-    selection: 'selection',
-  },
-}));
+jest.mock('expo-haptics');
 
 describe('HapticService', () => {
   let hapticService: HapticService;
@@ -20,68 +12,69 @@ describe('HapticService', () => {
     jest.clearAllMocks();
   });
 
-  describe('triggerPulse', () => {
-    it('should trigger light haptic for tap pattern', async () => {
-      await hapticService.triggerPulse('tap', 0.5);
+  describe('triggerHaptic', () => {
+    it('should trigger tap pattern correctly', async () => {
+      const mockTrigger = jest.spyOn(Haptics, 'impactAsync');
       
-      expect(HapticFeedback.trigger).toHaveBeenCalledWith('impactLight', {
-        enableVibrateFallback: true,
-        ignoreAndroidSystemSettings: false,
-      });
+      await hapticService.triggerHaptic(PulsePattern.TAP);
+      
+      expect(mockTrigger).toHaveBeenCalledWith(Haptics.ImpactFeedbackStyle.Medium);
     });
 
-    it('should trigger heavy haptic for shatter pattern with high intensity', async () => {
-      await hapticService.triggerPulse('shatter', 0.9);
+    it('should trigger swirl pattern correctly', async () => {
+      const mockTrigger = jest.spyOn(Haptics, 'selectionAsync');
       
-      expect(HapticFeedback.trigger).toHaveBeenCalledWith('impactHeavy', {
-        enableVibrateFallback: true,
-        ignoreAndroidSystemSettings: false,
-      });
+      await hapticService.triggerHaptic(PulsePattern.SWIRL);
+      
+      expect(mockTrigger).toHaveBeenCalledTimes(3);
     });
 
-    it('should handle invalid pattern gracefully', async () => {
-      await hapticService.triggerPulse('invalid' as any, 0.5);
+    it('should trigger shatter pattern correctly', async () => {
+      const mockTrigger = jest.spyOn(Haptics, 'impactAsync');
       
-      expect(HapticFeedback.trigger).toHaveBeenCalledWith('impactMedium', {
-        enableVibrateFallback: true,
-        ignoreAndroidSystemSettings: false,
-      });
+      await hapticService.triggerHaptic(PulsePattern.SHATTER);
+      
+      expect(mockTrigger).toHaveBeenCalledTimes(5);
+      expect(mockTrigger).toHaveBeenCalledWith(Haptics.ImpactFeedbackStyle.Heavy);
     });
 
-    it('should clamp intensity values', async () => {
-      await hapticService.triggerPulse('tap', 2.0);
+    it('should handle haptic errors gracefully', async () => {
+      const mockTrigger = jest.spyOn(Haptics, 'impactAsync').mockRejectedValue(new Error('Haptic error'));
+      const consoleSpy = jest.spyOn(console, 'error').mockImplementation();
       
-      expect(HapticFeedback.trigger).toHaveBeenCalledWith('impactMedium', {
-        enableVibrateFallback: true,
-        ignoreAndroidSystemSettings: false,
-      });
-    });
-  });
-
-  describe('triggerSequence', () => {
-    it('should trigger sequence of haptic patterns', async () => {
-      const sequence = [
-        { pattern: 'tap' as const, intensity: 0.3, delay: 100 },
-        { pattern: 'swirl' as const, intensity: 0.7, delay: 200 },
-      ];
-
-      await hapticService.triggerSequence(sequence);
-
-      expect(HapticFeedback.trigger).toHaveBeenCalledTimes(2);
-    });
-
-    it('should handle empty sequence', async () => {
-      await hapticService.triggerSequence([]);
+      await hapticService.triggerHaptic(PulsePattern.TAP);
       
-      expect(HapticFeedback.trigger).not.toHaveBeenCalled();
+      expect(consoleSpy).toHaveBeenCalledWith('Haptic feedback error:', expect.any(Error));
+      
+      consoleSpy.mockRestore();
     });
   });
 
-  describe('isSupported', () => {
-    it('should return haptic support status', () => {
-      const isSupported = hapticService.isSupported();
+  describe('isHapticSupported', () => {
+    it('should return true when haptics are supported', () => {
+      expect(hapticService.isHapticSupported()).toBe(true);
+    });
+  });
+
+  describe('setHapticEnabled', () => {
+    it('should enable haptics', () => {
+      hapticService.setHapticEnabled(true);
+      expect(hapticService.isEnabled()).toBe(true);
+    });
+
+    it('should disable haptics', () => {
+      hapticService.setHapticEnabled(false);
+      expect(hapticService.isEnabled()).toBe(false);
+    });
+  });
+
+  describe('triggerGoldenPulseHaptic', () => {
+    it('should trigger enhanced haptic for golden pulse', async () => {
+      const mockTrigger = jest.spyOn(Haptics, 'notificationAsync');
       
-      expect(typeof isSupported).toBe('boolean');
+      await hapticService.triggerGoldenPulseHaptic();
+      
+      expect(mockTrigger).toHaveBeenCalledWith(Haptics.NotificationFeedbackType.Success);
     });
   });
 });
