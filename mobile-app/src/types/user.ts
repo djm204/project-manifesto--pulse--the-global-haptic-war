@@ -1,31 +1,60 @@
 export interface User {
   id: string;
-  deviceId: string;
-  isAnonymous: boolean;
+  username: string;
+  email: string;
+  avatar?: string;
+  country: string;
+  timezone: string;
+  level: number;
+  experience: number;
+  coins: number;
+  premiumCurrency: number;
+  settings: UserSettings;
+  statistics: UserStatistics;
   createdAt: number;
-  lastActive: number;
-  preferences: UserPreferences;
+  lastActiveAt: number;
 }
 
-export interface UserPreferences {
-  hapticIntensity: number;
+export interface UserSettings {
+  hapticEnabled: boolean;
   soundEnabled: boolean;
   notificationsEnabled: boolean;
-  privacyLevel: 'minimal' | 'standard' | 'full';
+  privacyMode: boolean;
+  language: string;
+  theme: Theme;
 }
 
-export interface UserStats {
+export interface UserStatistics {
   totalPulses: number;
-  bestAccuracy: number;
-  currentStreak: number;
+  averageAccuracy: number;
   bestRank: number;
-  averageScore: number;
+  bestPercentile: number;
+  streakCurrent: number;
+  streakBest: number;
+  totalRewards: number;
 }
 
-export interface LeaderboardEntry {
-  rank: number;
-  userId: string;
-  score: number;
-  accuracy: number;
-  streak: number;
+export enum Theme {
+  LIGHT = 'light',
+  DARK = 'dark',
+  AUTO = 'auto'
+}
+
+export interface AuthTokens {
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: number;
+}
+
+export interface LoginCredentials {
+  email: string;
+  password: string;
+}
+
+export interface RegisterData {
+  username: string;
+  email: string;
+  password: string;
+  country: string;
+  timezone: string;
 }
