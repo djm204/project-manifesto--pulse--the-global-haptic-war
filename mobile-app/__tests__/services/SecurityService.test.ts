@@ -1,192 +1,202 @@
-import SecurityService from '../../src/services/SecurityService';
-import Keychain from 'react-native-keychain';
-import EncryptedStorage from 'react-native-encrypted-storage';
+import { SecurityService } from '../../src/services/SecurityService';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import DeviceInfo from 'react-native-device-info';
 
-jest.mock('react-native-keychain');
-jest.mock('react-native-encrypted-storage');
-jest.mock('crypto', () => ({
-  createHash: jest.fn(() => ({
-    update: jest.fn().mockReturnThis(),
-    digest: jest.fn(() => 'mocked-hash-value'),
-  })),
-  createCipher: jest.fn(() => ({
-    update: jest.fn(() => 'encrypted-part'),
-    final: jest.fn(() => '-final'),
-  })),
-  createDecipher: jest.fn(() => ({
-    update: jest.fn(() => 'decrypted-part'),
-    final: jest.fn(() => '-final'),
-  })),
-}));
+jest.mock('@react-native-async-storage/async-storage');
+jest.mock('react-native-device-info');
 
 describe('SecurityService', () => {
-  let securityService: SecurityService;
-  const mockKeychain = Keychain as jest.Mocked<typeof Keychain>;
-  const mockEncryptedStorage = EncryptedStorage as jest.Mocked<typeof EncryptedStorage>;
-
-  beforeEach(async () => {
+  beforeEach(() => {
     jest.clearAllMocks();
-    securityService = SecurityService.getInstance();
   });
 
-  describe('initialization', () => {
-    it('should initialize with existing encryption key', async () => {
-      mockKeychain.getInternetCredentials.mockResolvedValue({
-        username: 'key',
-        password: 'existing-key',
-        service: 'pulse_encryption',
-        storage: 'keychain',
-      });
-
-      await securityService.initialize();
+  describe('generateSecureToken', () => {
+    it('should generate a secure token', () => {
+      const token = SecurityService.generateSecureToken();
       
-      expect(mockKeychain.getInternetCredentials).toHaveBeenCalledWith('pulse_encryption');
+      expect(token).toBeDefined();
+      expect(typeof token).toBe('string');
+      expect(token.length).toBeGreaterThan(10);
     });
 
-    it('should generate new encryption key if none exists', async () => {
-      mockKeychain.getInternetCredentials.mockResolvedValue(false);
-      mockKeychain.setInternetCredentials.mockResolvedValue({ service: 'pulse_encryption' });
-
-      await securityService.initialize();
+    it('should generate unique tokens', () => {
+      const token1 = SecurityService.generateSecureToken();
+      const token2 = SecurityService.generateSecureToken();
       
-      expect(mockKeychain.setInternetCredentials).toHaveBeenCalledWith(
-        'pulse_encryption',
-        'key',
-        expect.any(String)
-      );
-    });
-
-    it('should throw error if initialization fails', async () => {
-      mockKeychain.getInternetCredentials.mockRejectedValue(new Error('Keychain error'));
-
-      await expect(securityService.initialize()).rejects.toThrow('Security initialization failed');
+      expect(token1).not.toBe(token2);
     });
   });
 
-  describe('data encryption', () => {
-    beforeEach(async () => {
-      mockKeychain.getInternetCredentials.mockResolvedValue({
-        username: 'key',
-        password: 'test-key',
-        service: 'pulse_encryption',
-        storage: 'keychain',
-      });
-      await securityService.initialize();
+  describe('encryptSensitiveData', () => {
+    it('should encrypt data successfully', () => {
+      const testData = 'sensitive-test-data';
+      
+      const encrypted = SecurityService.encryptSensitiveData(testData);
+      
+      expect(encrypted).toBeDefined();
+      expect(encrypted).not.toBe(testData);
+      expect(typeof encrypted).toBe('string');
     });
 
-    it('should encrypt data successfully', async () => {
-      const testData = 'sensitive data';
-      const result = await securityService.encryptData(testData);
+    it('should produce different output for same input (due to salt)', () => {
+      const testData = 'test-data';
       
-      expect(result).toBe('encrypted-part-final');
-    });
-
-    it('should decrypt data successfully', async () => {
-      const encryptedData = 'encrypted-data';
-      const result = await securityService.decryptData(encryptedData);
+      const encrypted1 = SecurityService.encryptSensitiveData(testData);
+      const encrypted2 = SecurityService.encryptSensitiveData(testData);
       
-      expect(result).toBe('decrypted-part-final');
-    });
-
-    it('should throw error when encrypting without initialization', async () => {
-      const uninitializedService = new (SecurityService as any)();
-      
-      await expect(uninitializedService.encryptData('data')).rejects.toThrow('Encryption key not initialized');
+      expect(encrypted1).not.toBe(encrypted2);
     });
   });
 
-  describe('secure storage', () => {
-    beforeEach(async () => {
-      mockKeychain.getInternetCredentials.mockResolvedValue({
-        username: 'key',
-        password: 'test-key',
-        service: 'pulse_encryption',
-        storage: 'keychain',
-      });
-      await securityService.initialize();
+  describe('decryptSensitiveData', () => {
+    it('should decrypt data successfully', () => {
+      const testData = 'sensitive-test-data';
+      const encrypted = SecurityService.encryptSensitiveData(testData);
+      
+      const decrypted = SecurityService.decryptSensitiveData(encrypted);
+      
+      expect(decrypted).toBe(testData);
     });
 
-    it('should store data securely', async () => {
-      const key = 'test-key';
-      const value = 'test-value';
-      
-      await securityService.storeSecurely(key, value);
-      
-      expect(mockEncryptedStorage.setItem).toHaveBeenCalledWith(key, 'encrypted-part-final');
-    });
-
-    it('should retrieve data securely', async () => {
-      const key = 'test-key';
-      mockEncryptedStorage.getItem.mockResolvedValue('encrypted-value');
-      
-      const result = await securityService.retrieveSecurely(key);
-      
-      expect(result).toBe('decrypted-part-final');
-      expect(mockEncryptedStorage.getItem).toHaveBeenCalledWith(key);
-    });
-
-    it('should return null for non-existent keys', async () => {
-      mockEncryptedStorage.getItem.mockResolvedValue(null);
-      
-      const result = await securityService.retrieveSecurely('non-existent');
-      
-      expect(result).toBeNull();
+    it('should throw error for invalid encrypted data', () => {
+      expect(() => {
+        SecurityService.decryptSensitiveData('invalid-encrypted-data');
+      }).toThrow();
     });
   });
 
-  describe('device fingerprinting', () => {
-    it('should generate consistent device fingerprint', () => {
-      const fingerprint1 = securityService.generateDeviceFingerprint();
-      const fingerprint2 = securityService.generateDeviceFingerprint();
+  describe('hashIdentifier', () => {
+    it('should hash identifier consistently', () => {
+      const identifier = 'test-identifier';
       
-      expect(fingerprint1).toBe(fingerprint2);
-      expect(fingerprint1).toHaveLength(32);
+      const hash1 = SecurityService.hashIdentifier(identifier);
+      const hash2 = SecurityService.hashIdentifier(identifier);
+      
+      expect(hash1).toBe(hash2);
+      expect(hash1).not.toBe(identifier);
+    });
+
+    it('should produce different hashes for different inputs', () => {
+      const hash1 = SecurityService.hashIdentifier('input1');
+      const hash2 = SecurityService.hashIdentifier('input2');
+      
+      expect(hash1).not.toBe(hash2);
     });
   });
 
-  describe('input validation', () => {
-    it('should validate email addresses correctly', () => {
-      expect(securityService.validateInput('test@example.com', 'email')).toBe(true);
-      expect(securityService.validateInput('invalid-email', 'email')).toBe(false);
-      expect(securityService.validateInput('', 'email')).toBe(false);
+  describe('getDeviceId', () => {
+    it('should return device ID from DeviceInfo', async () => {
+      const mockDeviceId = 'test-device-id-123';
+      (DeviceInfo.getUniqueId as jest.Mock).mockResolvedValue(mockDeviceId);
+      
+      const deviceId = await SecurityService.getDeviceId();
+      
+      expect(deviceId).toBe(mockDeviceId);
+      expect(DeviceInfo.getUniqueId).toHaveBeenCalled();
     });
 
-    it('should validate usernames correctly', () => {
-      expect(securityService.validateInput('validuser123', 'username')).toBe(true);
-      expect(securityService.validateInput('user_name', 'username')).toBe(true);
-      expect(securityService.validateInput('ab', 'username')).toBe(false); // too short
-      expect(securityService.validateInput('user@name', 'username')).toBe(false); // invalid char
-    });
-
-    it('should validate general input correctly', () => {
-      expect(securityService.validateInput('Valid input 123', 'general')).toBe(true);
-      expect(securityService.validateInput('Input-with_dots.', 'general')).toBe(true);
-      expect(securityService.validateInput('', 'general')).toBe(false);
+    it('should handle DeviceInfo errors gracefully', async () => {
+      (DeviceInfo.getUniqueId as jest.Mock).mockRejectedValue(new Error('Device ID error'));
+      
+      await expect(SecurityService.getDeviceId()).rejects.toThrow('Device ID error');
     });
   });
 
-  describe('input sanitization', () => {
-    it('should remove dangerous characters', () => {
-      const maliciousInput = '<script>alert("xss")</script>';
-      const sanitized = securityService.sanitizeInput(maliciousInput);
+  describe('validateAdInteraction', () => {
+    const validInteraction = {
+      timestamp: Date.now(),
+      userAgent: 'test-user-agent',
+      pattern: 'tap',
+      duration: 1000,
+      deviceId: 'test-device'
+    };
+
+    it('should validate correct ad interaction', () => {
+      const result = SecurityService.validateAdInteraction(validInteraction);
       
-      expect(sanitized).toBe('scriptalert(xss)/script');
-      expect(sanitized).not.toContain('<');
-      expect(sanitized).not.toContain('>');
+      expect(result).toBe(true);
     });
 
-    it('should trim whitespace', () => {
-      const input = '  spaced input  ';
-      const sanitized = securityService.sanitizeInput(input);
+    it('should reject interaction with future timestamp', () => {
+      const futureInteraction = {
+        ...validInteraction,
+        timestamp: Date.now() + 10000
+      };
       
-      expect(sanitized).toBe('spaced input');
+      const result = SecurityService.validateAdInteraction(futureInteraction);
+      
+      expect(result).toBe(false);
     });
 
-    it('should limit input length', () => {
-      const longInput = 'a'.repeat(2000);
-      const sanitized = securityService.sanitizeInput(longInput);
+    it('should reject interaction with old timestamp', () => {
+      const oldInteraction = {
+        ...validInteraction,
+        timestamp: Date.now() - 70000 // 70 seconds ago
+      };
       
-      expect(sanitized).toHaveLength(1000);
+      const result = SecurityService.validateAdInteraction(oldInteraction);
+      
+      expect(result).toBe(false);
+    });
+
+    it('should reject interaction with invalid pattern', () => {
+      const invalidInteraction = {
+        ...validInteraction,
+        pattern: 'invalid-pattern'
+      };
+      
+      const result = SecurityService.validateAdInteraction(invalidInteraction);
+      
+      expect(result).toBe(false);
+    });
+
+    it('should reject interaction with suspicious duration', () => {
+      const suspiciousInteraction = {
+        ...validInteraction,
+        duration: 50 // Too short
+      };
+      
+      const result = SecurityService.validateAdInteraction(suspiciousInteraction);
+      
+      expect(result).toBe(false);
+    });
+  });
+
+  describe('getAuthToken', () => {
+    it('should retrieve auth token from storage', async () => {
+      const mockToken = 'test-auth-token';
+      (AsyncStorage.getItem as jest.Mock).mockResolvedValue(mockToken);
+      
+      const token = await SecurityService.getAuthToken();
+      
+      expect(token).toBe(mockToken);
+      expect(AsyncStorage.getItem).toHaveBeenCalledWith('auth_token');
+    });
+
+    it('should return null when no token exists', async () => {
+      (AsyncStorage.getItem as jest.Mock).mockResolvedValue(null);
+      
+      const token = await SecurityService.getAuthToken();
+      
+      expect(token).toBeNull();
+    });
+  });
+
+  describe('setAuthToken', () => {
+    it('should store auth token securely', async () => {
+      const testToken = 'test-token-123';
+      
+      await SecurityService.setAuthToken(testToken);
+      
+      expect(AsyncStorage.setItem).toHaveBeenCalledWith('auth_token', testToken);
+    });
+  });
+
+  describe('clearAuthToken', () => {
+    it('should remove auth token from storage', async () => {
+      await SecurityService.clearAuthToken();
+      
+      expect(AsyncStorage.removeItem).toHaveBeenCalledWith('auth_token');
     });
   });
 });
