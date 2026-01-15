@@ -1,70 +1,82 @@
 export interface PulseEvent {
   id: string;
   timestamp: number;
-  countdownDuration: number;
-  hapticPattern: HapticPattern;
-  globalParticipants: number;
-  status: PulseStatus;
-}
-
-export interface PulseResult {
-  id: string;
   userId: string;
-  eventId: string;
   accuracy: number;
-  reactionTime: number;
-  rank: number;
-  percentile: number;
-  rewards: PulseReward[];
-  timestamp: number;
+  deviceInfo: DeviceInfo;
 }
 
-export interface PulseReward {
-  type: RewardType;
-  amount: number;
-  currency: string;
+export interface DeviceInfo {
+  platform: 'ios' | 'android';
+  version: string;
+  model: string;
+  timezone: string;
+}
+
+export interface SyncState {
+  isConnected: boolean;
+  latency: number;
+  serverTime: number;
+  localOffset: number;
+  region: string;
+}
+
+export interface HapticPattern {
+  name: 'tap' | 'swirl' | 'shatter' | 'custom';
+  pattern: number[];
+  intensity: number;
+}
+
+export interface GameSession {
+  id: string;
+  startTime: number;
+  endTime: number;
+  participants: number;
+  region: string;
+  difficulty: 'easy' | 'medium' | 'hard';
+}
+
+export interface UserProfile {
+  id: string;
+  username: string;
+  level: number;
+  experience: number;
+  achievements: Achievement[];
+  stats: UserStats;
+  preferences: UserPreferences;
+}
+
+export interface Achievement {
+  id: string;
+  name: string;
   description: string;
+  unlockedAt?: number;
+  progress: number;
+  maxProgress: number;
 }
 
-export enum HapticPattern {
-  TAP = 'tap',
-  SWIRL = 'swirl',
-  SHATTER = 'shatter'
+export interface UserStats {
+  totalPulses: number;
+  averageAccuracy: number;
+  bestStreak: number;
+  globalRank: number;
+  regionalRank: number;
+  sessionsPlayed: number;
 }
 
-export enum PulseStatus {
-  SCHEDULED = 'scheduled',
-  COUNTDOWN = 'countdown',
-  ACTIVE = 'active',
-  COMPLETED = 'completed'
-}
-
-export enum RewardType {
-  COINS = 'coins',
-  EXPERIENCE = 'experience',
-  PREMIUM_CURRENCY = 'premium_currency'
+export interface UserPreferences {
+  hapticEnabled: boolean;
+  soundEnabled: boolean;
+  notificationsEnabled: boolean;
+  dataCollection: boolean;
+  adPersonalization: boolean;
 }
 
 export interface LeaderboardEntry {
   userId: string;
   username: string;
-  rank: number;
   score: number;
-  percentile: number;
-  country: string;
-  avatar?: string;
-}
-
-export interface Leaderboard {
-  type: LeaderboardType;
-  entries: LeaderboardEntry[];
-  userRank?: number;
-  totalParticipants: number;
-  lastUpdated: number;
-}
-
-export enum LeaderboardType {
-  GLOBAL = 'global',
-  LOCAL = 'local',
-  FRIENDS = 'friends'
+  accuracy: number;
+  rank: number;
+  country?: string;
 }

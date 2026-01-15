@@ -1,105 +1,181 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as Keychain from 'react-native-keychain';
 import CryptoJS from 'crypto-js';
-import { SECURITY_CONFIG } from '../utils/constants';
-
-export interface SecurityCredentials {
-  token: string;
-  refreshToken: string;
-  expiresAt: number;
-}
-
-export class SecurityError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'SecurityError';
-  }
-}
+import Keychain from 'react-native-keychain';
+import EncryptedStorage from 'react-native-encrypted-storage';
+import { validateInput } from '../utils/validation';
 
 export class SecurityService {
   private static instance: SecurityService;
-  private encryptionKey: string;
+  private encryptionKey: string | null = null;
 
-  private constructor() {
-    this.encryptionKey = SECURITY_CONFIG.ENCRYPTION_KEY;
-  }
+  private constructor() {}
 
-  static getInstance(): SecurityService {
+  public static getInstance(): SecurityService {
     if (!SecurityService.instance) {
       SecurityService.instance = new SecurityService();
     }
     return SecurityService.instance;
   }
 
-  async storeCredentials(credentials: SecurityCredentials): Promise<void> {
+  /**
+   * Initialize security service with device-specific encryption key
+   */
+  public async initialize(): Promise<void> {
     try {
-      const encryptedCredentials = this.encrypt(JSON.stringify(credentials));
-      await Keychain.setInternetCredentials(
-        SECURITY_CONFIG.KEYCHAIN_SERVICE,
-        'user',
-        encryptedCredentials
-      );
-    } catch (error) {
-      throw new SecurityError('Failed to store credentials securely');
-    }
-  }
-
-  async getCredentials(): Promise<SecurityCredentials | null> {
-    try {
-      const result = await Keychain.getInternetCredentials(SECURITY_CONFIG.KEYCHAIN_SERVICE);
-      if (result && result.password) {
-        const decryptedData = this.decrypt(result.password);
-        return JSON.parse(decryptedData);
+      const credentials = await Keychain.getInternetCredentials('global-pulse-key');
+      
+      if (credentials) {
+        this.encryptionKey = credentials.password;
+      } else {
+        // Generate new encryption key
+        this.encryptionKey = CryptoJS.lib.WordArray.random(256/8).toString();
+        await Keychain.setInternetCredentials(
+          'global-pulse-key',
+          'encryption-key',
+          this.encryptionKey
+        );
       }
-      return null;
     } catch (error) {
-      throw new SecurityError('Failed to retrieve credentials');
+      throw new Error(`Failed to initialize security service: ${error}`);
     }
   }
 
-  async getValidatedToken(): Promise<string | null> {
-    const credentials = await this.getCredentials();
-    if (!credentials) return null;
-
-    if (Date.now() >= credentials.expiresAt) {
-      await this.clearCredentials();
-      return null;
+  /**
+   * Encrypt sensitive data using AES-256
+   */
+  public encrypt(data: string): string {
+    if (!this.encryptionKey) {
+      throw new Error('Security service not initialized');
     }
 
-    return credentials.token;
-  }
+    if (!validateInput.isString(data)) {
+      throw new Error('Invalid data type for encryption');
+    }
 
-  async clearCredentials(): Promise<void> {
     try {
-      await Keychain.resetInternetCredentials(SECURITY_CONFIG.KEYCHAIN_SERVICE);
+      const encrypted = CryptoJS.AES.encrypt(data, this.encryptionKey).toString();
+      return encrypted;
     } catch (error) {
-      throw new SecurityError('Failed to clear credentials');
+      throw new Error(`Encryption failed: ${error}`);
     }
   }
 
-  encrypt(data: string): string {
-    return CryptoJS.AES.encrypt(data, this.encryptionKey).toString();
+  /**
+   * Decrypt sensitive data
+   */
+  public decrypt(encryptedData: string): string {
+    if (!this.encryptionKey) {
+      throw new Error('Security service not initialized');
+    }
+
+    if (!validateInput.isString(encryptedData)) {
+      throw new Error('Invalid encrypted data');
+    }
+
+    try {
+      const decrypted = CryptoJS.AES.decrypt(encryptedData, this.encryptionKey);
+      return decrypted.toString(CryptoJS.enc.Utf8);
+    } catch (error) {
+      throw new Error(`Decryption failed: ${error}`);
+    }
   }
 
-  decrypt(encryptedData: string): string {
-    const bytes = CryptoJS.AES.decrypt(encryptedData, this.encryptionKey);
-    return bytes.toString(CryptoJS.enc.Utf8);
+  /**
+   * Store sensitive data securely
+   */
+  public async storeSecure(key: string, value: string): Promise<void> {
+    if (!validateInput.isString(key) || !validateInput.isString(value)) {
+      throw new Error('Invalid key or value for secure storage');
+    }
+
+    try {
+      const encryptedValue = this.encrypt(value);
+      await EncryptedStorage.setItem(key, encryptedValue);
+    } catch (error) {
+      throw new Error(`Failed to store secure data: ${error}`);
+    }
   }
 
-  generateAnonymousUserId(): string {
-    return CryptoJS.lib.WordArray.random(16).toString();
+  /**
+   * Retrieve sensitive data securely
+   */
+  public async getSecure(key: string): Promise<string | null> {
+    if (!validateInput.isString(key)) {
+      throw new Error('Invalid key for secure retrieval');
+    }
+
+    try {
+      const encryptedValue = await EncryptedStorage.getItem(key);
+      if (!encryptedValue) {
+        return null;
+      }
+      return this.decrypt(encryptedValue);
+    } catch (error) {
+      throw new Error(`Failed to retrieve secure data: ${error}`);
+    }
   }
 
-  sanitizeInput(input: string): string {
-    return input.replace(/[<>\"'%;()&+]/g, '');
+  /**
+   * Remove sensitive data securely
+   */
+  public async removeSecure(key: string): Promise<void> {
+    if (!validateInput.isString(key)) {
+      throw new Error('Invalid key for secure removal');
+    }
+
+    try {
+      await EncryptedStorage.removeItem(key);
+    } catch (error) {
+      throw new Error(`Failed to remove secure data: ${error}`);
+    }
   }
 
-  validateInput(input: string, maxLength: number = 1000): boolean {
-    if (!input || typeof input !== 'string') return false;
-    if (input.length > maxLength) return false;
-    
-    // Check for potential XSS patterns
-    const xssPatterns = [/<script/i, /javascript:/i, /on\w+=/i];
-    return !xssPatterns.some(pattern => pattern.test(input));
+  /**
+   * Hash data using SHA-256
+   */
+  public hash(data: string): string {
+    if (!validateInput.isString(data)) {
+      throw new Error('Invalid data for hashing');
+    }
+
+    return CryptoJS.SHA256(data).toString();
+  }
+
+  /**
+   * Generate secure random string
+   */
+  public generateSecureRandom(length: number = 32): string {
+    if (!validateInput.isPositiveInteger(length)) {
+      throw new Error('Invalid length for random generation');
+    }
+
+    return CryptoJS.lib.WordArray.random(length).toString();
+  }
+
+  /**
+   * Sanitize input to prevent injection attacks
+   */
+  public sanitizeInput(input: string): string {
+    if (!validateInput.isString(input)) {
+      return '';
+    }
+
+    return input
+      .replace(/[<>]/g, '') // Remove HTML tags
+      .replace(/['"]/g, '') // Remove quotes
+      .replace(/[;&|`$]/g, '') // Remove command injection chars
+      .trim();
+  }
+
+  /**
+   * Clear all security data (for logout/reset)
+   */
+  public async clearAll(): Promise<void> {
+    try {
+      await Keychain.resetInternetCredentials('global-pulse-key');
+      await EncryptedStorage.clear();
+      this.encryptionKey = null;
+    } catch (error) {
+      throw new Error(`Failed to clear security data: ${error}`);
+    }
   }
 }

@@ -1,30 +1,33 @@
 {
   "name": "global-pulse",
   "version": "1.0.0",
-  "description": "PULSE - The Global Haptic War",
+  "description": "Real-time synchronized global pulse game",
   "private": true,
   "workspaces": [
     "mobile-app",
     "backend"
   ],
   "scripts": {
-    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:mobile\"",
+    "dev": "concurrently \"npm run dev:mobile\" \"npm run dev:backend\"",
+    "dev:mobile": "cd mobile-app && npm run start",
     "dev:backend": "cd backend && npm run dev",
-    "dev:mobile": "cd mobile-app && npm start",
-    "test": "npm run test:backend && npm run test:mobile",
-    "test:backend": "cd backend && npm test",
+    "test": "npm run test:mobile && npm run test:backend",
     "test:mobile": "cd mobile-app && npm test",
-    "build": "npm run build:backend && npm run build:mobile",
-    "build:backend": "cd backend && npm run build",
-    "build:mobile": "cd mobile-app && npm run build",
-    "lint": "npm run lint:backend && npm run lint:mobile",
-    "lint:backend": "cd backend && npm run lint",
+    "test:backend": "cd backend && npm test",
+    "lint": "npm run lint:mobile && npm run lint:backend",
     "lint:mobile": "cd mobile-app && npm run lint",
+    "lint:backend": "cd backend && npm run lint",
+    "build": "npm run build:mobile && npm run build:backend",
+    "build:mobile": "cd mobile-app && npm run build",
+    "build:backend": "cd backend && npm run build",
     "prepare": "husky install"
   },
   "devDependencies": {
-    "concurrently": "^8.2.2",
-    "husky": "^8.0.3",
-    "lerna": "^7.4.2"
+    "concurrently": "^8.2.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.45.0",
+    "prettier": "^3.0.0",
+    "husky": "^8.0.3"
   }
 }
