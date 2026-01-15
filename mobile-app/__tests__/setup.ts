@@ -17,10 +17,7 @@ jest.mock('react-native-haptic-feedback', () => ({
   HapticFeedbackTypes: {
     impactLight: 'impactLight',
     impactMedium: 'impactMedium',
-    impactHeavy: 'impactHeavy',
-    notificationSuccess: 'notificationSuccess',
-    notificationWarning: 'notificationWarning',
-    notificationError: 'notificationError'
+    impactHeavy: 'impactHeavy'
   }
 }));
 
@@ -29,21 +26,8 @@ jest.mock('socket.io-client', () => ({
     on: jest.fn(),
     emit: jest.fn(),
     disconnect: jest.fn(),
-    once: jest.fn()
+    connected: true
   }))
 }));
 
-jest.mock('react-native-device-info', () => ({
-  getUniqueId: jest.fn(() => Promise.resolve('test-device-id')),
-  getSystemName: jest.fn(() => 'iOS'),
-  getSystemVersion: jest.fn(() => '15.0'),
-  getModel: jest.fn(() => 'iPhone 13')
-}));
-
-jest.mock('@react-native-firebase/analytics', () => ({
-  logEvent: jest.fn(),
-  setUserId: jest.fn(),
-  setUserProperty: jest.fn()
-}));
-
-global.fetch = jest.fn();
+global.__DEV__ = true;
