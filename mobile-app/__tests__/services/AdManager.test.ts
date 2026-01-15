@@ -1,104 +1,145 @@
 import { AdManager } from '../../src/services/AdManager';
-import { AnalyticsService } from '../../src/services/AnalyticsService';
+import { AppLovinMAX } from 'react-native-applovin-max';
+import { SecurityService } from '../../src/services/SecurityService';
 
-jest.mock('../../src/services/AnalyticsService');
+// Mock dependencies
 jest.mock('react-native-applovin-max', () => ({
-  AppLovinMAX: {
-    initialize: jest.fn(),
-    isRewardedAdReady: jest.fn(),
-    loadRewardedAd: jest.fn(),
-    showRewardedAd: jest.fn(),
-    setRewardedAdListener: jest.fn(),
-  },
+  initialize: jest.fn(),
+  isRewardedAdReady: jest.fn(),
+  showRewardedAd: jest.fn(),
+  isInterstitialReady: jest.fn(),
+  showInterstitial: jest.fn(),
+  setBannerPlacement: jest.fn(),
+  showBanner: jest.fn(),
+  hideBanner: jest.fn(),
 }));
+
+jest.mock('../../src/services/SecurityService');
 
 describe('AdManager', () => {
   let adManager: AdManager;
-  let mockAnalytics: jest.Mocked<AnalyticsService>;
 
   beforeEach(() => {
-    mockAnalytics = new AnalyticsService() as jest.Mocked<AnalyticsService>;
-    adManager = new AdManager();
+    adManager = AdManager.getInstance();
     jest.clearAllMocks();
+  });
+
+  describe('getInstance', () => {
+    it('should return singleton instance', () => {
+      const instance1 = AdManager.getInstance();
+      const instance2 = AdManager.getInstance();
+      
+      expect(instance1).toBe(instance2);
+    });
   });
 
   describe('initialize', () => {
     it('should initialize AppLovin MAX SDK', async () => {
-      const { AppLovinMAX } = require('react-native-applovin-max');
-      AppLovinMAX.initialize.mockResolvedValue(true);
-
-      await adManager.initialize();
-
-      expect(AppLovinMAX.initialize).toHaveBeenCalledWith(expect.any(String));
+      const mockSdkKey = 'test-sdk-key';
+      (AppLovinMAX.initialize as jest.Mock).mockResolvedValue(true);
+      
+      await adManager.initialize(mockSdkKey);
+      
+      expect(AppLovinMAX.initialize).toHaveBeenCalledWith(mockSdkKey);
+      expect(adManager.isInitialized()).toBe(true);
     });
 
     it('should handle initialization failure', async () => {
-      const { AppLovinMAX } = require('react-native-applovin-max');
-      AppLovinMAX.initialize.mockRejectedValue(new Error('Init failed'));
-
-      await expect(adManager.initialize()).rejects.toThrow('Init failed');
+      (AppLovinMAX.initialize as jest.Mock).mockRejectedValue(new Error('Init failed'));
+      
+      await expect(adManager.initialize('invalid-key')).rejects.toThrow('Init failed');
+      expect(adManager.isInitialized()).toBe(false);
     });
   });
 
-  describe('showRewardedAd', () => {
-    it('should show rewarded ad when ready', async () => {
-      const { AppLovinMAX } = require('react-native-applovin-max');
-      AppLovinMAX.isRewardedAdReady.mockReturnValue(true);
-      AppLovinMAX.showRewardedAd.mockResolvedValue({ reward: { type: 'coins', amount: 100 } });
-
-      const result = await adManager.showRewardedAd('cooldown_bypass');
-
-      expect(AppLovinMAX.showRewardedAd).toHaveBeenCalled();
-      expect(result.success).toBe(true);
+  describe('showRewardedVideo', () => {
+    beforeEach(async () => {
+      await adManager.initialize('test-key');
     });
 
-    it('should load ad if not ready', async () => {
-      const { AppLovinMAX } = require('react-native-applovin-max');
-      AppLovinMAX.isRewardedAdReady.mockReturnValue(false);
-      AppLovinMAX.loadRewardedAd.mockResolvedValue(true);
+    it('should show rewarded video and return reward', async () => {
+      (AppLovinMAX.isRewardedAdReady as jest.Mock).mockResolvedValue(true);
+      (AppLovinMAX.showRewardedAd as jest.Mock).mockResolvedValue({
+        reward: { type: 'power_multiplier', amount: 2.0 }
+      });
 
-      await adManager.showRewardedAd('golden_pulse');
+      const reward = await adManager.showRewardedVideo('pre_pulse');
 
-      expect(AppLovinMAX.loadRewardedAd).toHaveBeenCalled();
+      expect(reward).toEqual({
+        type: 'power_multiplier',
+        value: 2.0,
+        duration: 300000
+      });
+    });
+
+    it('should throw error when no ad is available', async () => {
+      (AppLovinMAX.isRewardedAdReady as jest.Mock).mockResolvedValue(false);
+
+      await expect(adManager.showRewardedVideo('pre_pulse')).rejects.toThrow('No rewarded ad available');
     });
 
     it('should handle ad show failure', async () => {
-      const { AppLovinMAX } = require('react-native-applovin-max');
-      AppLovinMAX.isRewardedAdReady.mockReturnValue(true);
-      AppLovinMAX.showRewardedAd.mockRejectedValue(new Error('Ad failed'));
+      (AppLovinMAX.isRewardedAdReady as jest.Mock).mockResolvedValue(true);
+      (AppLovinMAX.showRewardedAd as jest.Mock).mockRejectedValue(new Error('Ad failed'));
 
-      const result = await adManager.showRewardedAd('extra_attempts');
-
-      expect(result.success).toBe(false);
-      expect(result.error).toBe('Ad failed');
+      await expect(adManager.showRewardedVideo('pre_pulse')).rejects.toThrow('Ad failed');
     });
   });
 
-  describe('preloadAds', () => {
-    it('should preload multiple ad units', async () => {
-      const { AppLovinMAX } = require('react-native-applovin-max');
-      AppLovinMAX.loadRewardedAd.mockResolvedValue(true);
+  describe('showInterstitial', () => {
+    beforeEach(async () => {
+      await adManager.initialize('test-key');
+    });
 
-      await adManager.preloadAds();
+    it('should show interstitial when ready', async () => {
+      (AppLovinMAX.isInterstitialReady as jest.Mock).mockResolvedValue(true);
+      (AppLovinMAX.showInterstitial as jest.Mock).mockResolvedValue(true);
 
-      expect(AppLovinMAX.loadRewardedAd).toHaveBeenCalledTimes(3);
+      await adManager.showInterstitial('post_pulse');
+
+      expect(AppLovinMAX.showInterstitial).toHaveBeenCalledWith('post_pulse');
+    });
+
+    it('should not show interstitial when not ready', async () => {
+      (AppLovinMAX.isInterstitialReady as jest.Mock).mockResolvedValue(false);
+
+      await adManager.showInterstitial('post_pulse');
+
+      expect(AppLovinMAX.showInterstitial).not.toHaveBeenCalled();
     });
   });
 
-  describe('getRewardForAdType', () => {
-    it('should return correct reward for cooldown bypass', () => {
-      const reward = adManager.getRewardForAdType('cooldown_bypass');
-      expect(reward).toEqual({ type: 'cooldown_bypass', amount: 1 });
+  describe('getRewardType', () => {
+    it('should return correct reward type for pre_pulse placement', () => {
+      expect(adManager.getRewardType('pre_pulse')).toBe('power_multiplier');
     });
 
-    it('should return correct reward for golden pulse', () => {
-      const reward = adManager.getRewardForAdType('golden_pulse');
-      expect(reward).toEqual({ type: 'golden_pulse', amount: 1 });
+    it('should return correct reward type for bonus_pulse placement', () => {
+      expect(adManager.getRewardType('bonus_pulse')).toBe('extra_pulse');
     });
 
-    it('should return unknown reward for invalid type', () => {
-      const reward = adManager.getRewardForAdType('invalid' as any);
-      expect(reward).toEqual({ type: 'unknown', amount: 0 });
+    it('should return default reward type for unknown placement', () => {
+      expect(adManager.getRewardType('unknown')).toBe('power_multiplier');
+    });
+  });
+
+  describe('isRewardedAdReady', () => {
+    it('should return ad ready status', async () => {
+      (AppLovinMAX.isRewardedAdReady as jest.Mock).mockResolvedValue(true);
+
+      const isReady = await adManager.isRewardedAdReady();
+
+      expect(isReady).toBe(true);
+    });
+  });
+
+  describe('isInterstitialReady', () => {
+    it('should return interstitial ready status', async () => {
+      (AppLovinMAX.isInterstitialReady as jest.Mock).mockResolvedValue(false);
+
+      const isReady = await adManager.isInterstitialReady();
+
+      expect(isReady).toBe(false);
     });
   });
 });
