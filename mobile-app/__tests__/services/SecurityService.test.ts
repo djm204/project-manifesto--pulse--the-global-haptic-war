@@ -1,234 +1,198 @@
-import { SecurityService, SecurityError } from '../../src/services/SecurityService';
-import * as Keychain from 'react-native-keychain';
-import CryptoJS from 'crypto-js';
+import { SecurityService } from '../../src/services/SecurityService';
+import Keychain from 'react-native-keychain';
+import { MMKV } from 'react-native-mmkv';
+import DeviceInfo from 'react-native-device-info';
 
-// Mock CryptoJS
-jest.mock('crypto-js', () => ({
-  AES: {
-    encrypt: jest.fn(() => ({ toString: () => 'encrypted_data' })),
-    decrypt: jest.fn(() => ({ toString: () => 'decrypted_data' })),
-  },
-  enc: {
-    Utf8: 'utf8',
-  },
-  lib: {
-    WordArray: {
-      random: jest.fn(() => ({ toString: () => 'random_string' })),
-    },
-  },
-}));
+jest.mock('react-native-keychain');
+jest.mock('react-native-mmkv');
+jest.mock('react-native-device-info');
+
+const mockMMKV = {
+  set: jest.fn(),
+  getString: jest.fn(),
+  delete: jest.fn(),
+};
+
+(MMKV as jest.Mock).mockImplementation(() => mockMMKV);
 
 describe('SecurityService', () => {
   let securityService: SecurityService;
 
   beforeEach(() => {
-    securityService = SecurityService.getInstance();
     jest.clearAllMocks();
+    securityService = new SecurityService();
   });
 
-  describe('getInstance', () => {
-    it('should return singleton instance', () => {
-      const instance1 = SecurityService.getInstance();
-      const instance2 = SecurityService.getInstance();
-      expect(instance1).toBe(instance2);
+  describe('initialize', () => {
+    it('should initialize with existing encryption key', async () => {
+      (Keychain.getInternetCredentials as jest.Mock).mockResolvedValue({
+        password: 'existing-key',
+      });
+
+      await expect(securityService.initialize()).resolves.not.toThrow();
     });
-  });
 
-  describe('storeCredentials', () => {
-    it('should store credentials securely', async () => {
-      const credentials = {
-        token: 'test_token',
-        refreshToken: 'test_refresh_token',
-        expiresAt: Date.now() + 3600000,
-      };
+    it('should generate new encryption key when none exists', async () => {
+      (Keychain.getInternetCredentials as jest.Mock).mockResolvedValue(false);
+      (Keychain.setInternetCredentials as jest.Mock).mockResolvedValue(true);
 
-      await securityService.storeCredentials(credentials);
-
+      await expect(securityService.initialize()).resolves.not.toThrow();
       expect(Keychain.setInternetCredentials).toHaveBeenCalledWith(
-        expect.any(String),
-        'user',
-        'encrypted_data'
+        'pulse-app',
+        'encryption',
+        expect.any(String)
       );
     });
 
-    it('should throw SecurityError when storage fails', async () => {
-      (Keychain.setInternetCredentials as jest.Mock).mockRejectedValue(new Error('Storage failed'));
+    it('should throw error when keychain fails', async () => {
+      (Keychain.getInternetCredentials as jest.Mock).mockRejectedValue(
+        new Error('Keychain error')
+      );
 
-      const credentials = {
-        token: 'test_token',
-        refreshToken: 'test_refresh_token',
-        expiresAt: Date.now() + 3600000,
-      };
-
-      await expect(securityService.storeCredentials(credentials)).rejects.toThrow(SecurityError);
+      await expect(securityService.initialize()).rejects.toThrow(
+        'Encryption initialization failed'
+      );
     });
   });
 
-  describe('getCredentials', () => {
-    it('should retrieve and decrypt credentials', async () => {
+  describe('encryptData and decryptData', () => {
+    beforeEach(async () => {
       (Keychain.getInternetCredentials as jest.Mock).mockResolvedValue({
-        username: 'user',
-        password: 'encrypted_data',
+        password: 'test-encryption-key',
       });
+      await securityService.initialize();
+    });
 
-      (CryptoJS.AES.decrypt as jest.Mock).mockReturnValue({
-        toString: () => JSON.stringify({
-          token: 'test_token',
-          refreshToken: 'test_refresh_token',
-          expiresAt: Date.now() + 3600000,
-        }),
+    it('should encrypt and decrypt data successfully', async () => {
+      const testData = { message: 'Hello World', number: 42 };
+
+      const encrypted = await securityService.encryptData(testData);
+      expect(typeof encrypted).toBe('string');
+      expect(encrypted).not.toEqual(JSON.stringify(testData));
+
+      const decrypted = await securityService.decryptData(encrypted);
+      expect(decrypted).toEqual(testData);
+    });
+
+    it('should throw error when encrypting without initialization', async () => {
+      const uninitializedService = new SecurityService();
+      
+      await expect(uninitializedService.encryptData({})).rejects.toThrow(
+        'Encryption not initialized'
+      );
+    });
+
+    it('should throw error when decrypting invalid data', async () => {
+      await expect(securityService.decryptData('invalid-data')).rejects.toThrow(
+        'Decryption failed'
+      );
+    });
+  });
+
+  describe('storeSecureData and getSecureData', () => {
+    beforeEach(async () => {
+      (Keychain.getInternetCredentials as jest.Mock).mockResolvedValue({
+        password: 'test-encryption-key',
       });
+      await securityService.initialize();
+    });
 
-      const credentials = await securityService.getCredentials();
+    it('should store and retrieve secure data', async () => {
+      const testData = { sensitive: 'information' };
+      const key = 'test-key';
 
-      expect(credentials).toEqual({
-        token: 'test_token',
-        refreshToken: 'test_refresh_token',
-        expiresAt: expect.any(Number),
+      await securityService.storeSecureData(key, testData);
+      expect(mockMMKV.set).toHaveBeenCalledWith(key, expect.any(String));
+
+      mockMMKV.getString.mockReturnValue('encrypted-data');
+      jest.spyOn(securityService, 'decryptData').mockResolvedValue(testData);
+
+      const retrieved = await securityService.getSecureData(key);
+      expect(retrieved).toEqual(testData);
+    });
+
+    it('should return null for non-existent key', async () => {
+      mockMMKV.getString.mockReturnValue(undefined);
+
+      const result = await securityService.getSecureData('non-existent');
+      expect(result).toBeNull();
+    });
+  });
+
+  describe('getDeviceId', () => {
+    beforeEach(async () => {
+      (Keychain.getInternetCredentials as jest.Mock).mockResolvedValue({
+        password: 'test-encryption-key',
       });
+      await securityService.initialize();
     });
 
-    it('should return null when no credentials found', async () => {
-      (Keychain.getInternetCredentials as jest.Mock).mockResolvedValue(false);
+    it('should generate and store device ID when none exists', async () => {
+      jest.spyOn(securityService, 'getSecureData').mockResolvedValue(null);
+      jest.spyOn(securityService, 'storeSecureData').mockResolvedValue();
+      (DeviceInfo.getUniqueId as jest.Mock).mockResolvedValue('device-123');
 
-      const credentials = await securityService.getCredentials();
+      const deviceId = await securityService.getDeviceId();
 
-      expect(credentials).toBeNull();
+      expect(deviceId).toBe('device-123');
+      expect(securityService.storeSecureData).toHaveBeenCalledWith('device_id', 'device-123');
     });
 
-    it('should throw SecurityError when retrieval fails', async () => {
-      (Keychain.getInternetCredentials as jest.Mock).mockRejectedValue(new Error('Retrieval failed'));
+    it('should return existing device ID', async () => {
+      jest.spyOn(securityService, 'getSecureData').mockResolvedValue('existing-device-id');
 
-      await expect(securityService.getCredentials()).rejects.toThrow(SecurityError);
+      const deviceId = await securityService.getDeviceId();
+      expect(deviceId).toBe('existing-device-id');
     });
   });
 
-  describe('getValidatedToken', () => {
-    it('should return valid token when not expired', async () => {
-      const futureTime = Date.now() + 3600000;
-      jest.spyOn(securityService, 'getCredentials').mockResolvedValue({
-        token: 'valid_token',
-        refreshToken: 'refresh_token',
-        expiresAt: futureTime,
+  describe('auth token management', () => {
+    beforeEach(async () => {
+      (Keychain.getInternetCredentials as jest.Mock).mockResolvedValue({
+        password: 'test-encryption-key',
       });
-
-      const token = await securityService.getValidatedToken();
-
-      expect(token).toBe('valid_token');
+      await securityService.initialize();
     });
 
-    it('should return null and clear credentials when expired', async () => {
-      const pastTime = Date.now() - 3600000;
-      jest.spyOn(securityService, 'getCredentials').mockResolvedValue({
-        token: 'expired_token',
-        refreshToken: 'refresh_token',
-        expiresAt: pastTime,
-      });
-      jest.spyOn(securityService, 'clearCredentials').mockResolvedValue();
+    it('should set and get auth token', async () => {
+      const token = 'jwt-token-123';
+      jest.spyOn(securityService, 'storeSecureData').mockResolvedValue();
+      jest.spyOn(securityService, 'getSecureData').mockResolvedValue(token);
 
-      const token = await securityService.getValidatedToken();
+      await securityService.setAuthToken(token);
+      expect(securityService.storeSecureData).toHaveBeenCalledWith('auth_token', token);
 
-      expect(token).toBeNull();
-      expect(securityService.clearCredentials).toHaveBeenCalled();
+      const retrieved = await securityService.getAuthToken();
+      expect(retrieved).toBe(token);
     });
 
-    it('should return null when no credentials exist', async () => {
-      jest.spyOn(securityService, 'getCredentials').mockResolvedValue(null);
-
-      const token = await securityService.getValidatedToken();
-
-      expect(token).toBeNull();
-    });
-  });
-
-  describe('clearCredentials', () => {
-    it('should clear credentials from keychain', async () => {
-      await securityService.clearCredentials();
-
-      expect(Keychain.resetInternetCredentials).toHaveBeenCalled();
-    });
-
-    it('should throw SecurityError when clearing fails', async () => {
-      (Keychain.resetInternetCredentials as jest.Mock).mockRejectedValue(new Error('Clear failed'));
-
-      await expect(securityService.clearCredentials()).rejects.toThrow(SecurityError);
-    });
-  });
-
-  describe('encrypt', () => {
-    it('should encrypt data', () => {
-      const data = 'test_data';
-      const result = securityService.encrypt(data);
-
-      expect(CryptoJS.AES.encrypt).toHaveBeenCalledWith(data, expect.any(String));
-      expect(result).toBe('encrypted_data');
-    });
-  });
-
-  describe('decrypt', () => {
-    it('should decrypt data', () => {
-      const encryptedData = 'encrypted_data';
-      const result = securityService.decrypt(encryptedData);
-
-      expect(CryptoJS.AES.decrypt).toHaveBeenCalledWith(encryptedData, expect.any(String));
-      expect(result).toBe('decrypted_data');
-    });
-  });
-
-  describe('generateAnonymousUserId', () => {
-    it('should generate anonymous user ID', () => {
-      const userId = securityService.generateAnonymousUserId();
-
-      expect(CryptoJS.lib.WordArray.random).toHaveBeenCalledWith(16);
-      expect(userId).toBe('random_string');
-    });
-  });
-
-  describe('sanitizeInput', () => {
-    it('should remove dangerous characters', () => {
-      const input = '<script>alert("xss")</script>';
-      const result = securityService.sanitizeInput(input);
-
-      expect(result).toBe('scriptalert("xss")/script');
-    });
-
-    it('should handle empty input', () => {
-      const result = securityService.sanitizeInput('');
-      expect(result).toBe('');
+    it('should clear auth token', async () => {
+      await securityService.clearAuthToken();
+      expect(mockMMKV.delete).toHaveBeenCalledWith('auth_token');
     });
   });
 
   describe('validateInput', () => {
-    it('should validate safe input', () => {
-      const input = 'This is a safe input';
-      const result = securityService.validateInput(input);
-
-      expect(result).toBe(true);
-    });
-
-    it('should reject input with XSS patterns', () => {
-      const inputs = [
-        '<script>alert("xss")</script>',
-        'javascript:alert("xss")',
-        'onclick=alert("xss")',
-      ];
-
-      inputs.forEach(input => {
-        const result = securityService.validateInput(input);
-        expect(result).toBe(false);
+    beforeEach(async () => {
+      (Keychain.getInternetCredentials as jest.Mock).mockResolvedValue({
+        password: 'test-encryption-key',
       });
+      await securityService.initialize();
     });
 
-    it('should reject input exceeding max length', () => {
-      const longInput = 'a'.repeat(1001);
-      const result = securityService.validateInput(longInput);
-
-      expect(result).toBe(false);
+    it('should validate email correctly', async () => {
+      expect(securityService.validateInput('test@example.com', 'email')).toBe(true);
+      expect(securityService.validateInput('invalid-email', 'email')).toBe(false);
     });
 
-    it('should reject non-string input', () => {
-      const result = securityService.validateInput(null as any);
-      expect(result).toBe(false);
+    it('should validate password correctly', async () => {
+      expect(securityService.validateInput('StrongPass123!', 'password')).toBe(true);
+      expect(securityService.validateInput('weak', 'password')).toBe(false);
+    });
+
+    it('should validate username correctly', async () => {
+      expect(securityService.validateInput('validUser123', 'username')).toBe(true);
+      expect(securityService.validateInput('ab', 'username')).toBe(false);
     });
   });
 });
