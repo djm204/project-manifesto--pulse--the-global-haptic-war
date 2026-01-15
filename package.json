@@ -1,0 +1,27 @@
+{
+  "name": "global-pulse",
+  "version": "1.0.0",
+  "description": "The Global Haptic War - Synchronized haptic feedback game",
+  "main": "index.js",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:mobile\" \"npm run dev:backend\"",
+    "dev:mobile": "cd mobile-app && npm start",
+    "dev:backend": "cd backend && npm run dev",
+    "test": "npm run test:mobile && npm run test:backend",
+    "test:mobile": "cd mobile-app && npm test",
+    "test:backend": "cd backend && npm test",
+    "build": "npm run build:mobile && npm run build:backend",
+    "build:mobile": "cd mobile-app && npm run build",
+    "build:backend": "cd backend && npm run build",
+    "prepare": "husky install"
+  },
+  "workspaces": [
+    "mobile-app",
+    "backend"
+  ],
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "husky": "^8.0.3",
+    "lint-staged": "^15.2.0"
+  }
+}
