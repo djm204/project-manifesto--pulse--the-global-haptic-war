@@ -1,14 +1,19 @@
 import { HapticService } from '../../src/services/HapticService';
-import { PULSE_PATTERNS } from '../../src/utils/constants';
+import { Platform } from 'react-native';
+import { HapticFeedback } from 'react-native-haptic-feedback';
+import { Vibration } from 'react-native';
 
-// Mock react-native-haptic-feedback
+jest.mock('react-native', () => ({
+  Platform: { OS: 'ios' },
+  Vibration: {
+    vibrate: jest.fn(),
+    cancel: jest.fn(),
+  },
+}));
+
 jest.mock('react-native-haptic-feedback', () => ({
-  trigger: jest.fn(),
-  HapticFeedbackTypes: {
-    impactLight: 'impactLight',
-    impactMedium: 'impactMedium',
-    impactHeavy: 'impactHeavy',
-    selection: 'selection',
+  HapticFeedback: {
+    trigger: jest.fn(),
   },
 }));
 
@@ -16,97 +21,90 @@ describe('HapticService', () => {
   let hapticService: HapticService;
 
   beforeEach(() => {
-    hapticService = new HapticService();
     jest.clearAllMocks();
+    hapticService = new HapticService();
   });
 
-  describe('initialization', () => {
-    it('should initialize with default settings', () => {
-      expect(hapticService.isEnabled()).toBe(true);
+  describe('iOS Platform', () => {
+    beforeEach(() => {
+      (Platform as any).OS = 'ios';
     });
 
-    it('should allow disabling haptics', () => {
-      hapticService.setEnabled(false);
-      expect(hapticService.isEnabled()).toBe(false);
-    });
-  });
+    it('should trigger light haptic feedback on iOS', async () => {
+      await hapticService.triggerPulse('light', 100);
 
-  describe('pulse patterns', () => {
-    it('should execute tap pattern correctly', async () => {
-      const mockTrigger = require('react-native-haptic-feedback').trigger;
-      
-      await hapticService.executePulsePattern('tap', 0.8);
-      
-      expect(mockTrigger).toHaveBeenCalledWith(
-        'impactMedium',
-        { enableVibrateFallback: true, ignoreAndroidSystemSettings: false }
-      );
+      expect(HapticFeedback.trigger).toHaveBeenCalledWith('impactLight', {
+        enableVibrateFallback: true,
+        ignoreAndroidSystemSettings: false,
+      });
     });
 
-    it('should execute swirl pattern with multiple haptics', async () => {
-      const mockTrigger = require('react-native-haptic-feedback').trigger;
-      
-      await hapticService.executePulsePattern('swirl', 1.0);
-      
-      expect(mockTrigger).toHaveBeenCalledTimes(3);
+    it('should trigger medium haptic feedback on iOS', async () => {
+      await hapticService.triggerPulse('medium', 200);
+
+      expect(HapticFeedback.trigger).toHaveBeenCalledWith('impactMedium', {
+        enableVibrateFallback: true,
+        ignoreAndroidSystemSettings: false,
+      });
     });
 
-    it('should execute shatter pattern with decreasing intensity', async () => {
-      const mockTrigger = require('react-native-haptic-feedback').trigger;
-      
-      await hapticService.executePulsePattern('shatter', 0.6);
-      
-      expect(mockTrigger).toHaveBeenCalledTimes(5);
-    });
+    it('should trigger heavy haptic feedback on iOS', async () => {
+      await hapticService.triggerPulse('heavy', 300);
 
-    it('should not execute patterns when disabled', async () => {
-      const mockTrigger = require('react-native-haptic-feedback').trigger;
-      hapticService.setEnabled(false);
-      
-      await hapticService.executePulsePattern('tap', 1.0);
-      
-      expect(mockTrigger).not.toHaveBeenCalled();
+      expect(HapticFeedback.trigger).toHaveBeenCalledWith('impactHeavy', {
+        enableVibrateFallback: true,
+        ignoreAndroidSystemSettings: false,
+      });
     });
   });
 
-  describe('intensity handling', () => {
-    it('should clamp intensity to valid range', async () => {
-      const mockTrigger = require('react-native-haptic-feedback').trigger;
-      
-      await hapticService.executePulsePattern('tap', 2.0); // Above max
-      await hapticService.executePulsePattern('tap', -0.5); // Below min
-      
-      expect(mockTrigger).toHaveBeenCalledTimes(2);
+  describe('Android Platform', () => {
+    beforeEach(() => {
+      (Platform as any).OS = 'android';
     });
 
-    it('should scale haptic type based on intensity', async () => {
-      const mockTrigger = require('react-native-haptic-feedback').trigger;
-      
-      await hapticService.executePulsePattern('tap', 0.3); // Light
-      await hapticService.executePulsePattern('tap', 0.7); // Medium
-      await hapticService.executePulsePattern('tap', 1.0); // Heavy
-      
-      expect(mockTrigger).toHaveBeenNthCalledWith(1, 'impactLight', expect.any(Object));
-      expect(mockTrigger).toHaveBeenNthCalledWith(2, 'impactMedium', expect.any(Object));
-      expect(mockTrigger).toHaveBeenNthCalledWith(3, 'impactHeavy', expect.any(Object));
+    it('should trigger light vibration on Android', async () => {
+      await hapticService.triggerPulse('light', 100);
+
+      expect(Vibration.vibrate).toHaveBeenCalledWith(100);
+    });
+
+    it('should trigger medium vibration on Android', async () => {
+      await hapticService.triggerPulse('medium', 200);
+
+      expect(Vibration.vibrate).toHaveBeenCalledWith(200);
+    });
+
+    it('should trigger heavy vibration on Android', async () => {
+      await hapticService.triggerPulse('heavy', 300);
+
+      expect(Vibration.vibrate).toHaveBeenCalledWith(300);
+    });
+
+    it('should trigger pattern vibration for long duration', async () => {
+      await hapticService.triggerPulse('heavy', 1000);
+
+      expect(Vibration.vibrate).toHaveBeenCalledWith([0, 200, 100, 200, 100, 200, 100, 200]);
     });
   });
 
-  describe('error handling', () => {
-    it('should handle invalid pattern gracefully', async () => {
-      const consoleSpy = jest.spyOn(console, 'warn').mockImplementation();
+  describe('triggerGlobalPulse', () => {
+    it('should trigger synchronized pulse sequence', async () => {
+      (Platform as any).OS = 'ios';
       
-      await hapticService.executePulsePattern('invalid' as any, 1.0);
-      
-      expect(consoleSpy).toHaveBeenCalledWith('Unknown pulse pattern: invalid');
-      consoleSpy.mockRestore();
-    });
+      await hapticService.triggerGlobalPulse();
 
-    it('should handle haptic trigger errors', async () => {
-      const mockTrigger = require('react-native-haptic-feedback').trigger;
-      mockTrigger.mockRejectedValueOnce(new Error('Haptic failed'));
+      expect(HapticFeedback.trigger).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  describe('stopHaptic', () => {
+    it('should cancel vibration on Android', () => {
+      (Platform as any).OS = 'android';
       
-      await expect(hapticService.executePulsePattern('tap', 1.0)).resolves.not.toThrow();
+      hapticService.stopHaptic();
+
+      expect(Vibration.cancel).toHaveBeenCalled();
     });
   });
 });
