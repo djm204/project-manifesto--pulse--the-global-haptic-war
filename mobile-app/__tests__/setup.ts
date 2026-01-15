@@ -1,33 +1,51 @@
 import 'react-native-gesture-handler/jestSetup';
+import '@testing-library/jest-native/extend-expect';
 
-jest.mock('react-native-reanimated', () => {
-  const Reanimated = require('react-native-reanimated/mock');
-  Reanimated.default.call = () => {};
-  return Reanimated;
-});
-
-jest.mock('react-native/Libraries/Animated/NativeAnimatedHelper');
-
-jest.mock('@react-native-async-storage/async-storage', () =>
-  require('@react-native-async-storage/async-storage/jest/async-storage-mock')
-);
+// Mock react-native modules
+jest.mock('react-native', () => ({
+  Platform: {
+    OS: 'ios',
+    select: jest.fn((obj) => obj.ios),
+  },
+  Alert: {
+    alert: jest.fn(),
+  },
+  Vibration: {
+    vibrate: jest.fn(),
+  },
+}));
 
 jest.mock('react-native-haptic-feedback', () => ({
   trigger: jest.fn(),
   HapticFeedbackTypes: {
     impactLight: 'impactLight',
     impactMedium: 'impactMedium',
-    impactHeavy: 'impactHeavy'
-  }
+    impactHeavy: 'impactHeavy',
+  },
+}));
+
+jest.mock('react-native-encrypted-storage', () => ({
+  setItem: jest.fn(),
+  getItem: jest.fn(),
+  removeItem: jest.fn(),
+  clear: jest.fn(),
 }));
 
 jest.mock('socket.io-client', () => ({
   io: jest.fn(() => ({
     on: jest.fn(),
+    off: jest.fn(),
     emit: jest.fn(),
+    once: jest.fn(),
     disconnect: jest.fn(),
-    connected: true
-  }))
+  })),
 }));
 
-global.__DEV__ = true;
+jest.mock('react-native-device-info', () => ({
+  getDeviceId: jest.fn(() => Promise.resolve('mock-device-id')),
+  getSystemVersion: jest.fn(() => '14.0'),
+  getBrand: jest.fn(() => 'Apple'),
+}));
+
+// Global test timeout
+jest.setTimeout(10000);
