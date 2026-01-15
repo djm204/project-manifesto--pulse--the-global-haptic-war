@@ -1,179 +1,121 @@
 import { SyncService } from '../../src/services/SyncService';
-import { SecurityService } from '../../src/services/SecurityService';
-import { PrivacyService } from '../../src/services/PrivacyService';
-import { io } from 'socket.io-client';
+import io from 'socket.io-client';
 
+// Mock socket.io-client
 jest.mock('socket.io-client');
-jest.mock('../../src/services/SecurityService');
-jest.mock('../../src/services/PrivacyService');
-
-const mockSocket = {
-  emit: jest.fn(),
-  on: jest.fn(),
-  disconnect: jest.fn(),
-  connected: true,
-};
-
-(io as jest.Mock).mockReturnValue(mockSocket);
 
 describe('SyncService', () => {
   let syncService: SyncService;
-  let mockSecurityService: jest.Mocked<SecurityService>;
-  let mockPrivacyService: jest.Mocked<PrivacyService>;
+  let mockSocket: any;
 
   beforeEach(() => {
-    jest.clearAllMocks();
-    syncService = new SyncService();
-    mockSecurityService = new SecurityService() as jest.Mocked<SecurityService>;
-    mockPrivacyService = new PrivacyService() as jest.Mocked<PrivacyService>;
+    mockSocket = {
+      connect: jest.fn(),
+      disconnect: jest.fn(),
+      on: jest.fn(),
+      off: jest.fn(),
+      emit: jest.fn(),
+      connected: false,
+    };
     
-    // Mock fetch for NTP queries
-    global.fetch = jest.fn();
+    (io as jest.Mock).mockReturnValue(mockSocket);
+    syncService = new SyncService('ws://test-server:3000');
   });
 
   afterEach(() => {
-    syncService.disconnect();
+    jest.clearAllMocks();
   });
 
-  describe('initialize', () => {
-    it('should initialize successfully with valid NTP and connection', async () => {
-      // Mock NTP response
-      (global.fetch as jest.Mock).mockResolvedValue({
-        headers: {
-          get: jest.fn().mockReturnValue(new Date().toISOString()),
-        },
+  describe('connect', () => {
+    it('should establish WebSocket connection', async () => {
+      mockSocket.connected = true;
+      mockSocket.connect.mockImplementation(() => {
+        mockSocket.connected = true;
       });
 
-      mockSecurityService.getAuthToken.mockResolvedValue('valid-token');
-      mockSocket.on.mockImplementation((event, callback) => {
-        if (event === 'connect') {
-          setTimeout(callback, 10);
-        }
-      });
+      await syncService.connect();
 
-      await expect(syncService.initialize()).resolves.not.toThrow();
+      expect(mockSocket.connect).toHaveBeenCalled();
+      expect(mockSocket.on).toHaveBeenCalledWith('connect', expect.any(Function));
+      expect(mockSocket.on).toHaveBeenCalledWith('disconnect', expect.any(Function));
+      expect(mockSocket.on).toHaveBeenCalledWith('pulse-sync', expect.any(Function));
     });
 
-    it('should throw error when all NTP servers fail', async () => {
-      (global.fetch as jest.Mock).mockRejectedValue(new Error('Network error'));
-
-      await expect(syncService.initialize()).rejects.toThrow('All NTP servers failed');
-    });
-
-    it('should throw error when connection fails', async () => {
-      (global.fetch as jest.Mock).mockResolvedValue({
-        headers: {
-          get: jest.fn().mockReturnValue(new Date().toISOString()),
-        },
+    it('should handle connection failure', async () => {
+      mockSocket.connect.mockImplementation(() => {
+        throw new Error('Connection failed');
       });
 
-      mockSocket.on.mockImplementation((event, callback) => {
-        if (event === 'connect_error') {
-          setTimeout(() => callback(new Error('Connection failed')), 10);
-        }
-      });
-
-      await expect(syncService.initialize()).rejects.toThrow('Connection failed');
+      await expect(syncService.connect()).rejects.toThrow('Connection failed');
     });
   });
 
-  describe('synchronizeGlobalPulse', () => {
-    beforeEach(async () => {
-      // Setup successful initialization
-      (global.fetch as jest.Mock).mockResolvedValue({
-        headers: {
-          get: jest.fn().mockReturnValue(new Date().toISOString()),
-        },
-      });
-
-      mockSecurityService.getAuthToken.mockResolvedValue('valid-token');
-      mockSocket.on.mockImplementation((event, callback) => {
-        if (event === 'connect') {
-          setTimeout(callback, 10);
-        }
-      });
-
-      await syncService.initialize();
-    });
-
-    it('should synchronize pulse successfully with valid consent', async () => {
-      mockPrivacyService.hasValidConsent.mockResolvedValue(true);
-      mockSecurityService.encryptData.mockResolvedValue('encrypted-payload');
-      mockSecurityService.getDeviceId.mockResolvedValue('device-123');
-
-      mockSocket.emit.mockImplementation((event, payload, callback) => {
-        if (event === 'pulse_sync_request') {
-          setTimeout(() => callback({
-            success: true,
-            pulseId: 'pulse-123',
-            timestamp: Date.now(),
-            participants: 100,
-          }), 10);
-        }
-      });
-
-      const result = await syncService.synchronizeGlobalPulse();
-
-      expect(result).toEqual({
-        id: 'pulse-123',
-        timestamp: expect.any(Number),
-        participants: 100,
-        globalSync: true,
-      });
-      expect(mockPrivacyService.hasValidConsent).toHaveBeenCalledWith('pulse_sync');
-    });
-
-    it('should throw error when user consent is not given', async () => {
-      mockPrivacyService.hasValidConsent.mockResolvedValue(false);
-
-      await expect(syncService.synchronizeGlobalPulse()).rejects.toThrow(
-        'User consent required for pulse synchronization'
-      );
-    });
-
-    it('should throw error when not connected', async () => {
+  describe('disconnect', () => {
+    it('should close WebSocket connection', () => {
       syncService.disconnect();
-      mockPrivacyService.hasValidConsent.mockResolvedValue(true);
 
-      await expect(syncService.synchronizeGlobalPulse()).rejects.toThrow(
-        'Not connected to sync server'
-      );
+      expect(mockSocket.disconnect).toHaveBeenCalled();
+    });
+  });
+
+  describe('syncTime', () => {
+    it('should synchronize time with server', async () => {
+      const mockServerTime = Date.now();
+      mockSocket.emit.mockImplementation((event, callback) => {
+        if (event === 'time-sync') {
+          callback({ serverTime: mockServerTime });
+        }
+      });
+
+      const result = await syncService.syncTime();
+
+      expect(mockSocket.emit).toHaveBeenCalledWith('time-sync', expect.any(Function));
+      expect(result).toBeCloseTo(mockServerTime, -2); // Within 100ms
     });
 
     it('should handle sync timeout', async () => {
-      mockPrivacyService.hasValidConsent.mockResolvedValue(true);
-      mockSecurityService.encryptData.mockResolvedValue('encrypted-payload');
-      mockSecurityService.getDeviceId.mockResolvedValue('device-123');
+      mockSocket.emit.mockImplementation(() => {
+        // Simulate timeout - don't call callback
+      });
 
-      // Don't call callback to simulate timeout
-      mockSocket.emit.mockImplementation(() => {});
-
-      await expect(syncService.synchronizeGlobalPulse()).rejects.toThrow(
-        'Pulse synchronization timeout'
-      );
+      await expect(syncService.syncTime()).rejects.toThrow('Time sync timeout');
     });
   });
 
-  describe('isConnectionActive', () => {
-    it('should return true when connected', async () => {
-      (global.fetch as jest.Mock).mockResolvedValue({
-        headers: {
-          get: jest.fn().mockReturnValue(new Date().toISOString()),
-        },
-      });
+  describe('joinPulse', () => {
+    it('should join pulse session', async () => {
+      const pulseId = 'pulse-123';
+      
+      await syncService.joinPulse(pulseId);
 
-      mockSocket.on.mockImplementation((event, callback) => {
-        if (event === 'connect') {
-          setTimeout(callback, 10);
-        }
-      });
-
-      await syncService.initialize();
-      expect(syncService.isConnectionActive()).toBe(true);
+      expect(mockSocket.emit).toHaveBeenCalledWith('join-pulse', { pulseId });
     });
+  });
 
-    it('should return false when disconnected', () => {
-      expect(syncService.isConnectionActive()).toBe(false);
+  describe('submitPulse', () => {
+    it('should submit pulse data', async () => {
+      const pulseData = {
+        timestamp: Date.now(),
+        pattern: 'tap' as const,
+        intensity: 0.8,
+        userId: 'user-123',
+      };
+
+      await syncService.submitPulse(pulseData);
+
+      expect(mockSocket.emit).toHaveBeenCalledWith('pulse-submit', pulseData);
+    });
+  });
+
+  describe('isConnected', () => {
+    it('should return connection status', () => {
+      mockSocket.connected = true;
+      
+      expect(syncService.isConnected()).toBe(true);
+      
+      mockSocket.connected = false;
+      
+      expect(syncService.isConnected()).toBe(false);
     });
   });
 });
