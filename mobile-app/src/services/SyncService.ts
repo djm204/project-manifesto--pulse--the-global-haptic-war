@@ -1,138 +1,120 @@
 import { io, Socket } from 'socket.io-client';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { API_CONFIG } from '../utils/constants';
 import { SecurityService } from './SecurityService';
+import { SYNC_CONFIG } from '../utils/constants';
+import { PulseEvent } from '../types/pulse';
 
-export interface SyncEvent {
-  id: string;
-  timestamp: number;
-  type: 'PULSE' | 'COUNTDOWN' | 'RESULT';
-  data: any;
+export class SyncError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SyncError';
+  }
 }
 
-export interface SyncStatus {
-  connected: boolean;
-  latency: number;
-  serverTime: number;
-  localOffset: number;
-}
-
-class SyncServiceClass {
+export class SyncService {
+  private static instance: SyncService;
   private socket: Socket | null = null;
-  private syncCallbacks: Map<string, (event: SyncEvent) => void> = new Map();
-  private latencyMeasurements: number[] = [];
-  private serverTimeOffset: number = 0;
-  private isConnected: boolean = false;
+  private securityService: SecurityService;
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 5;
+  private listeners: Map<string, (data: any) => void> = new Map();
 
-  async initialize(): Promise<void> {
-    try {
-      const token = await SecurityService.getSecureToken();
-      if (!token) {
-        throw new Error('Authentication required');
-      }
+  private constructor() {
+    this.securityService = SecurityService.getInstance();
+  }
 
-      this.socket = io(API_CONFIG.WEBSOCKET_URL, {
-        auth: { token },
-        transports: ['websocket'],
-        timeout: 5000,
-        reconnection: true,
-        reconnectionAttempts: 5,
-        reconnectionDelay: 1000,
-      });
-
-      this.setupEventHandlers();
-      await this.performTimeSync();
-    } catch (error) {
-      console.error('SyncService initialization failed:', error);
-      throw error;
+  static getInstance(): SyncService {
+    if (!SyncService.instance) {
+      SyncService.instance = new SyncService();
     }
+    return SyncService.instance;
+  }
+
+  async connectToGlobalSync(): Promise<void> {
+    const token = await this.securityService.getValidatedToken();
+    if (!token) {
+      throw new SyncError('Authentication required for sync');
+    }
+
+    this.socket = io(SYNC_CONFIG.SERVER_URL, {
+      auth: { token },
+      transports: ['websocket'],
+      timeout: SYNC_CONFIG.CONNECTION_TIMEOUT,
+      reconnection: true,
+      reconnectionAttempts: this.maxReconnectAttempts,
+      reconnectionDelay: 1000,
+    });
+
+    this.setupEventHandlers();
   }
 
   private setupEventHandlers(): void {
     if (!this.socket) return;
 
     this.socket.on('connect', () => {
-      this.isConnected = true;
       console.log('Connected to sync server');
+      this.reconnectAttempts = 0;
     });
 
-    this.socket.on('disconnect', () => {
-      this.isConnected = false;
-      console.log('Disconnected from sync server');
+    this.socket.on('disconnect', (reason) => {
+      console.log('Disconnected from sync server:', reason);
     });
 
-    this.socket.on('sync_event', (event: SyncEvent) => {
-      this.handleSyncEvent(event);
+    this.socket.on('connect_error', (error) => {
+      console.error('Connection error:', error);
+      this.reconnectAttempts++;
     });
 
-    this.socket.on('time_sync_response', (data: { serverTime: number; requestTime: number }) => {
-      this.handleTimeSyncResponse(data);
+    this.socket.on('pulse_event', (data: PulseEvent) => {
+      this.handlePulseEvent(data);
+    });
+
+    this.socket.on('sync_time', (serverTime: number) => {
+      this.synchronizeTime(serverTime);
     });
   }
 
-  private async performTimeSync(): Promise<void> {
-    if (!this.socket) return;
-
-    const requestTime = Date.now();
-    this.socket.emit('time_sync_request', { requestTime });
+  private handlePulseEvent(event: PulseEvent): void {
+    const listener = this.listeners.get('pulse_event');
+    if (listener) {
+      listener(event);
+    }
   }
 
-  private handleTimeSyncResponse(data: { serverTime: number; requestTime: number }): void {
-    const responseTime = Date.now();
-    const roundTripTime = responseTime - data.requestTime;
-    const latency = roundTripTime / 2;
+  private synchronizeTime(serverTime: number): void {
+    const clientTime = Date.now();
+    const timeDiff = serverTime - clientTime;
     
-    this.latencyMeasurements.push(latency);
-    if (this.latencyMeasurements.length > 10) {
-      this.latencyMeasurements.shift();
+    // Store time offset for future synchronization
+    this.storeTimeOffset(timeDiff);
+  }
+
+  private async storeTimeOffset(offset: number): Promise<void> {
+    // Store time offset securely for sync calculations
+    // Implementation depends on storage strategy
+  }
+
+  addEventListener(event: string, callback: (data: any) => void): void {
+    this.listeners.set(event, callback);
+  }
+
+  removeEventListener(event: string): void {
+    this.listeners.delete(event);
+  }
+
+  async sendPulseAction(action: any): Promise<void> {
+    if (!this.socket?.connected) {
+      throw new SyncError('Not connected to sync server');
     }
 
-    const estimatedServerTime = data.serverTime + latency;
-    this.serverTimeOffset = estimatedServerTime - responseTime;
+    this.socket.emit('pulse_action', action);
   }
 
-  private handleSyncEvent(event: SyncEvent): void {
-    // Apply time correction
-    const correctedEvent = {
-      ...event,
-      timestamp: event.timestamp + this.serverTimeOffset
-    };
+  async requestTimeSync(): Promise<void> {
+    if (!this.socket?.connected) {
+      throw new SyncError('Not connected to sync server');
+    }
 
-    // Notify all registered callbacks
-    this.syncCallbacks.forEach(callback => {
-      try {
-        callback(correctedEvent);
-      } catch (error) {
-        console.error('Sync callback error:', error);
-      }
-    });
-  }
-
-  subscribeTo(eventType: string, callback: (event: SyncEvent) => void): string {
-    const subscriptionId = `${eventType}_${Date.now()}_${Math.random()}`;
-    this.syncCallbacks.set(subscriptionId, callback);
-    return subscriptionId;
-  }
-
-  unsubscribe(subscriptionId: string): void {
-    this.syncCallbacks.delete(subscriptionId);
-  }
-
-  getSyncStatus(): SyncStatus {
-    const avgLatency = this.latencyMeasurements.length > 0 
-      ? this.latencyMeasurements.reduce((a, b) => a + b, 0) / this.latencyMeasurements.length 
-      : 0;
-
-    return {
-      connected: this.isConnected,
-      latency: avgLatency,
-      serverTime: Date.now() + this.serverTimeOffset,
-      localOffset: this.serverTimeOffset
-    };
-  }
-
-  getServerTime(): number {
-    return Date.now() + this.serverTimeOffset;
+    this.socket.emit('request_time_sync');
   }
 
   disconnect(): void {
@@ -140,9 +122,25 @@ class SyncServiceClass {
       this.socket.disconnect();
       this.socket = null;
     }
-    this.isConnected = false;
-    this.syncCallbacks.clear();
+    this.listeners.clear();
+  }
+
+  isConnected(): boolean {
+    return this.socket?.connected || false;
+  }
+
+  getServerLatency(): Promise<number> {
+    return new Promise((resolve, reject) => {
+      if (!this.socket?.connected) {
+        reject(new SyncError('Not connected to sync server'));
+        return;
+      }
+
+      const startTime = Date.now();
+      this.socket.emit('ping', startTime, (serverTime: number) => {
+        const latency = Date.now() - startTime;
+        resolve(latency);
+      });
+    });
   }
 }
-
-export const SyncService = new SyncServiceClass();

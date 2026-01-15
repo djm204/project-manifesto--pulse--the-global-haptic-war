@@ -1,202 +1,234 @@
-import { SecurityService } from '../../src/services/SecurityService';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import DeviceInfo from 'react-native-device-info';
+import { SecurityService, SecurityError } from '../../src/services/SecurityService';
+import * as Keychain from 'react-native-keychain';
+import CryptoJS from 'crypto-js';
 
-jest.mock('@react-native-async-storage/async-storage');
-jest.mock('react-native-device-info');
+// Mock CryptoJS
+jest.mock('crypto-js', () => ({
+  AES: {
+    encrypt: jest.fn(() => ({ toString: () => 'encrypted_data' })),
+    decrypt: jest.fn(() => ({ toString: () => 'decrypted_data' })),
+  },
+  enc: {
+    Utf8: 'utf8',
+  },
+  lib: {
+    WordArray: {
+      random: jest.fn(() => ({ toString: () => 'random_string' })),
+    },
+  },
+}));
 
 describe('SecurityService', () => {
+  let securityService: SecurityService;
+
   beforeEach(() => {
+    securityService = SecurityService.getInstance();
     jest.clearAllMocks();
   });
 
-  describe('generateSecureToken', () => {
-    it('should generate a secure token', () => {
-      const token = SecurityService.generateSecureToken();
-      
-      expect(token).toBeDefined();
-      expect(typeof token).toBe('string');
-      expect(token.length).toBeGreaterThan(10);
-    });
-
-    it('should generate unique tokens', () => {
-      const token1 = SecurityService.generateSecureToken();
-      const token2 = SecurityService.generateSecureToken();
-      
-      expect(token1).not.toBe(token2);
+  describe('getInstance', () => {
+    it('should return singleton instance', () => {
+      const instance1 = SecurityService.getInstance();
+      const instance2 = SecurityService.getInstance();
+      expect(instance1).toBe(instance2);
     });
   });
 
-  describe('encryptSensitiveData', () => {
-    it('should encrypt data successfully', () => {
-      const testData = 'sensitive-test-data';
-      
-      const encrypted = SecurityService.encryptSensitiveData(testData);
-      
-      expect(encrypted).toBeDefined();
-      expect(encrypted).not.toBe(testData);
-      expect(typeof encrypted).toBe('string');
-    });
-
-    it('should produce different output for same input (due to salt)', () => {
-      const testData = 'test-data';
-      
-      const encrypted1 = SecurityService.encryptSensitiveData(testData);
-      const encrypted2 = SecurityService.encryptSensitiveData(testData);
-      
-      expect(encrypted1).not.toBe(encrypted2);
-    });
-  });
-
-  describe('decryptSensitiveData', () => {
-    it('should decrypt data successfully', () => {
-      const testData = 'sensitive-test-data';
-      const encrypted = SecurityService.encryptSensitiveData(testData);
-      
-      const decrypted = SecurityService.decryptSensitiveData(encrypted);
-      
-      expect(decrypted).toBe(testData);
-    });
-
-    it('should throw error for invalid encrypted data', () => {
-      expect(() => {
-        SecurityService.decryptSensitiveData('invalid-encrypted-data');
-      }).toThrow();
-    });
-  });
-
-  describe('hashIdentifier', () => {
-    it('should hash identifier consistently', () => {
-      const identifier = 'test-identifier';
-      
-      const hash1 = SecurityService.hashIdentifier(identifier);
-      const hash2 = SecurityService.hashIdentifier(identifier);
-      
-      expect(hash1).toBe(hash2);
-      expect(hash1).not.toBe(identifier);
-    });
-
-    it('should produce different hashes for different inputs', () => {
-      const hash1 = SecurityService.hashIdentifier('input1');
-      const hash2 = SecurityService.hashIdentifier('input2');
-      
-      expect(hash1).not.toBe(hash2);
-    });
-  });
-
-  describe('getDeviceId', () => {
-    it('should return device ID from DeviceInfo', async () => {
-      const mockDeviceId = 'test-device-id-123';
-      (DeviceInfo.getUniqueId as jest.Mock).mockResolvedValue(mockDeviceId);
-      
-      const deviceId = await SecurityService.getDeviceId();
-      
-      expect(deviceId).toBe(mockDeviceId);
-      expect(DeviceInfo.getUniqueId).toHaveBeenCalled();
-    });
-
-    it('should handle DeviceInfo errors gracefully', async () => {
-      (DeviceInfo.getUniqueId as jest.Mock).mockRejectedValue(new Error('Device ID error'));
-      
-      await expect(SecurityService.getDeviceId()).rejects.toThrow('Device ID error');
-    });
-  });
-
-  describe('validateAdInteraction', () => {
-    const validInteraction = {
-      timestamp: Date.now(),
-      userAgent: 'test-user-agent',
-      pattern: 'tap',
-      duration: 1000,
-      deviceId: 'test-device'
-    };
-
-    it('should validate correct ad interaction', () => {
-      const result = SecurityService.validateAdInteraction(validInteraction);
-      
-      expect(result).toBe(true);
-    });
-
-    it('should reject interaction with future timestamp', () => {
-      const futureInteraction = {
-        ...validInteraction,
-        timestamp: Date.now() + 10000
+  describe('storeCredentials', () => {
+    it('should store credentials securely', async () => {
+      const credentials = {
+        token: 'test_token',
+        refreshToken: 'test_refresh_token',
+        expiresAt: Date.now() + 3600000,
       };
-      
-      const result = SecurityService.validateAdInteraction(futureInteraction);
-      
-      expect(result).toBe(false);
+
+      await securityService.storeCredentials(credentials);
+
+      expect(Keychain.setInternetCredentials).toHaveBeenCalledWith(
+        expect.any(String),
+        'user',
+        'encrypted_data'
+      );
     });
 
-    it('should reject interaction with old timestamp', () => {
-      const oldInteraction = {
-        ...validInteraction,
-        timestamp: Date.now() - 70000 // 70 seconds ago
-      };
-      
-      const result = SecurityService.validateAdInteraction(oldInteraction);
-      
-      expect(result).toBe(false);
-    });
+    it('should throw SecurityError when storage fails', async () => {
+      (Keychain.setInternetCredentials as jest.Mock).mockRejectedValue(new Error('Storage failed'));
 
-    it('should reject interaction with invalid pattern', () => {
-      const invalidInteraction = {
-        ...validInteraction,
-        pattern: 'invalid-pattern'
+      const credentials = {
+        token: 'test_token',
+        refreshToken: 'test_refresh_token',
+        expiresAt: Date.now() + 3600000,
       };
-      
-      const result = SecurityService.validateAdInteraction(invalidInteraction);
-      
-      expect(result).toBe(false);
-    });
 
-    it('should reject interaction with suspicious duration', () => {
-      const suspiciousInteraction = {
-        ...validInteraction,
-        duration: 50 // Too short
-      };
-      
-      const result = SecurityService.validateAdInteraction(suspiciousInteraction);
-      
-      expect(result).toBe(false);
+      await expect(securityService.storeCredentials(credentials)).rejects.toThrow(SecurityError);
     });
   });
 
-  describe('getAuthToken', () => {
-    it('should retrieve auth token from storage', async () => {
-      const mockToken = 'test-auth-token';
-      (AsyncStorage.getItem as jest.Mock).mockResolvedValue(mockToken);
-      
-      const token = await SecurityService.getAuthToken();
-      
-      expect(token).toBe(mockToken);
-      expect(AsyncStorage.getItem).toHaveBeenCalledWith('auth_token');
+  describe('getCredentials', () => {
+    it('should retrieve and decrypt credentials', async () => {
+      (Keychain.getInternetCredentials as jest.Mock).mockResolvedValue({
+        username: 'user',
+        password: 'encrypted_data',
+      });
+
+      (CryptoJS.AES.decrypt as jest.Mock).mockReturnValue({
+        toString: () => JSON.stringify({
+          token: 'test_token',
+          refreshToken: 'test_refresh_token',
+          expiresAt: Date.now() + 3600000,
+        }),
+      });
+
+      const credentials = await securityService.getCredentials();
+
+      expect(credentials).toEqual({
+        token: 'test_token',
+        refreshToken: 'test_refresh_token',
+        expiresAt: expect.any(Number),
+      });
     });
 
-    it('should return null when no token exists', async () => {
-      (AsyncStorage.getItem as jest.Mock).mockResolvedValue(null);
-      
-      const token = await SecurityService.getAuthToken();
-      
+    it('should return null when no credentials found', async () => {
+      (Keychain.getInternetCredentials as jest.Mock).mockResolvedValue(false);
+
+      const credentials = await securityService.getCredentials();
+
+      expect(credentials).toBeNull();
+    });
+
+    it('should throw SecurityError when retrieval fails', async () => {
+      (Keychain.getInternetCredentials as jest.Mock).mockRejectedValue(new Error('Retrieval failed'));
+
+      await expect(securityService.getCredentials()).rejects.toThrow(SecurityError);
+    });
+  });
+
+  describe('getValidatedToken', () => {
+    it('should return valid token when not expired', async () => {
+      const futureTime = Date.now() + 3600000;
+      jest.spyOn(securityService, 'getCredentials').mockResolvedValue({
+        token: 'valid_token',
+        refreshToken: 'refresh_token',
+        expiresAt: futureTime,
+      });
+
+      const token = await securityService.getValidatedToken();
+
+      expect(token).toBe('valid_token');
+    });
+
+    it('should return null and clear credentials when expired', async () => {
+      const pastTime = Date.now() - 3600000;
+      jest.spyOn(securityService, 'getCredentials').mockResolvedValue({
+        token: 'expired_token',
+        refreshToken: 'refresh_token',
+        expiresAt: pastTime,
+      });
+      jest.spyOn(securityService, 'clearCredentials').mockResolvedValue();
+
+      const token = await securityService.getValidatedToken();
+
+      expect(token).toBeNull();
+      expect(securityService.clearCredentials).toHaveBeenCalled();
+    });
+
+    it('should return null when no credentials exist', async () => {
+      jest.spyOn(securityService, 'getCredentials').mockResolvedValue(null);
+
+      const token = await securityService.getValidatedToken();
+
       expect(token).toBeNull();
     });
   });
 
-  describe('setAuthToken', () => {
-    it('should store auth token securely', async () => {
-      const testToken = 'test-token-123';
-      
-      await SecurityService.setAuthToken(testToken);
-      
-      expect(AsyncStorage.setItem).toHaveBeenCalledWith('auth_token', testToken);
+  describe('clearCredentials', () => {
+    it('should clear credentials from keychain', async () => {
+      await securityService.clearCredentials();
+
+      expect(Keychain.resetInternetCredentials).toHaveBeenCalled();
+    });
+
+    it('should throw SecurityError when clearing fails', async () => {
+      (Keychain.resetInternetCredentials as jest.Mock).mockRejectedValue(new Error('Clear failed'));
+
+      await expect(securityService.clearCredentials()).rejects.toThrow(SecurityError);
     });
   });
 
-  describe('clearAuthToken', () => {
-    it('should remove auth token from storage', async () => {
-      await SecurityService.clearAuthToken();
-      
-      expect(AsyncStorage.removeItem).toHaveBeenCalledWith('auth_token');
+  describe('encrypt', () => {
+    it('should encrypt data', () => {
+      const data = 'test_data';
+      const result = securityService.encrypt(data);
+
+      expect(CryptoJS.AES.encrypt).toHaveBeenCalledWith(data, expect.any(String));
+      expect(result).toBe('encrypted_data');
+    });
+  });
+
+  describe('decrypt', () => {
+    it('should decrypt data', () => {
+      const encryptedData = 'encrypted_data';
+      const result = securityService.decrypt(encryptedData);
+
+      expect(CryptoJS.AES.decrypt).toHaveBeenCalledWith(encryptedData, expect.any(String));
+      expect(result).toBe('decrypted_data');
+    });
+  });
+
+  describe('generateAnonymousUserId', () => {
+    it('should generate anonymous user ID', () => {
+      const userId = securityService.generateAnonymousUserId();
+
+      expect(CryptoJS.lib.WordArray.random).toHaveBeenCalledWith(16);
+      expect(userId).toBe('random_string');
+    });
+  });
+
+  describe('sanitizeInput', () => {
+    it('should remove dangerous characters', () => {
+      const input = '<script>alert("xss")</script>';
+      const result = securityService.sanitizeInput(input);
+
+      expect(result).toBe('scriptalert("xss")/script');
+    });
+
+    it('should handle empty input', () => {
+      const result = securityService.sanitizeInput('');
+      expect(result).toBe('');
+    });
+  });
+
+  describe('validateInput', () => {
+    it('should validate safe input', () => {
+      const input = 'This is a safe input';
+      const result = securityService.validateInput(input);
+
+      expect(result).toBe(true);
+    });
+
+    it('should reject input with XSS patterns', () => {
+      const inputs = [
+        '<script>alert("xss")</script>',
+        'javascript:alert("xss")',
+        'onclick=alert("xss")',
+      ];
+
+      inputs.forEach(input => {
+        const result = securityService.validateInput(input);
+        expect(result).toBe(false);
+      });
+    });
+
+    it('should reject input exceeding max length', () => {
+      const longInput = 'a'.repeat(1001);
+      const result = securityService.validateInput(longInput);
+
+      expect(result).toBe(false);
+    });
+
+    it('should reject non-string input', () => {
+      const result = securityService.validateInput(null as any);
+      expect(result).toBe(false);
     });
   });
 });
