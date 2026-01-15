@@ -1,111 +1,196 @@
 import { AdManager } from '../../src/services/AdManager';
-import { AppLovinMAX } from 'applovin-max-react-native';
+import { AppLovinMAX } from '@applovin/react-native-max';
+import { AdResult, UserSegment } from '../../src/types/ads';
 
 // Mock AppLovin MAX SDK
-jest.mock('applovin-max-react-native', () => ({
-  initialize: jest.fn(),
-  showRewardedAd: jest.fn(),
-  showInterstitialAd: jest.fn(),
-  loadRewardedAd: jest.fn(),
-  loadInterstitialAd: jest.fn(),
-  isRewardedAdReady: jest.fn(),
-  isInterstitialAdReady: jest.fn(),
-  setRewardedAdListener: jest.fn(),
-  setInterstitialAdListener: jest.fn(),
+jest.mock('@applovin/react-native-max', () => ({
+  AppLovinMAX: {
+    showRewardedAd: jest.fn(),
+    preloadRewardedAd: jest.fn(),
+    setTargetECPM: jest.fn(),
+    isRewardedAdReady: jest.fn(),
+    initialize: jest.fn(),
+  },
 }));
 
 describe('AdManager', () => {
   let adManager: AdManager;
-  const mockRewardedAdUnitId = 'test-rewarded-ad-unit';
-  const mockInterstitialAdUnitId = 'test-interstitial-ad-unit';
+  let mockMaxSdk: jest.Mocked<typeof AppLovinMAX>;
 
   beforeEach(() => {
-    adManager = new AdManager(mockRewardedAdUnitId, mockInterstitialAdUnitId);
     jest.clearAllMocks();
-  });
-
-  describe('initialize', () => {
-    it('should initialize AppLovin MAX SDK', async () => {
-      (AppLovinMAX.initialize as jest.Mock).mockResolvedValue(true);
-
-      await adManager.initialize();
-
-      expect(AppLovinMAX.initialize).toHaveBeenCalled();
-      expect(AppLovinMAX.setRewardedAdListener).toHaveBeenCalled();
-      expect(AppLovinMAX.setInterstitialAdListener).toHaveBeenCalled();
-    });
-
-    it('should handle initialization failure', async () => {
-      (AppLovinMAX.initialize as jest.Mock).mockRejectedValue(new Error('Init failed'));
-
-      await expect(adManager.initialize()).rejects.toThrow('Init failed');
-    });
+    mockMaxSdk = AppLovinMAX as jest.Mocked<typeof AppLovinMAX>;
+    adManager = new AdManager();
+    (adManager as any).maxSdk = mockMaxSdk;
   });
 
   describe('showRewardedAd', () => {
-    it('should show rewarded ad when ready', async () => {
-      (AppLovinMAX.isRewardedAdReady as jest.Mock).mockReturnValue(true);
-      (AppLovinMAX.showRewardedAd as jest.Mock).mockResolvedValue(true);
+    it('should show rewarded ad and return success result', async () => {
+      const placement = 'pre-pulse-power';
+      mockMaxSdk.isRewardedAdReady.mockReturnValue(true);
+      mockMaxSdk.showRewardedAd.mockImplementation((placementId, callbacks) => {
+        setTimeout(() => {
+          callbacks.onAdDisplayed();
+          callbacks.onAdCompleted();
+        }, 100);
+      });
 
-      const result = await adManager.showRewardedAd();
+      const result = await adManager.showRewardedAd(placement);
 
-      expect(AppLovinMAX.showRewardedAd).toHaveBeenCalledWith(mockRewardedAdUnitId);
-      expect(result).toBe(true);
+      expect(result.success).toBe(true);
+      expect(result.reward).toBe('double_power');
+      expect(mockMaxSdk.showRewardedAd).toHaveBeenCalledWith(placement, expect.any(Object));
     });
 
-    it('should return false when ad not ready', async () => {
-      (AppLovinMAX.isRewardedAdReady as jest.Mock).mockReturnValue(false);
+    it('should handle ad failure gracefully', async () => {
+      const placement = 'pre-pulse-power';
+      const errorMessage = 'Ad failed to load';
+      mockMaxSdk.isRewardedAdReady.mockReturnValue(true);
+      mockMaxSdk.showRewardedAd.mockImplementation((placementId, callbacks) => {
+        setTimeout(() => callbacks.onAdFailed(new Error(errorMessage)), 100);
+      });
 
-      const result = await adManager.showRewardedAd();
+      const result = await adManager.showRewardedAd(placement);
 
-      expect(AppLovinMAX.showRewardedAd).not.toHaveBeenCalled();
-      expect(result).toBe(false);
+      expect(result.success).toBe(false);
+      expect(result.error).toBe(errorMessage);
+    });
+
+    it('should preload ad before showing', async () => {
+      const placement = 'pre-pulse-power';
+      mockMaxSdk.isRewardedAdReady.mockReturnValue(false);
+      const preloadSpy = jest.spyOn(adManager as any, 'preloadRewardedAd').mockResolvedValue(true);
+
+      mockMaxSdk.showRewardedAd.mockImplementation((placementId, callbacks) => {
+        setTimeout(() => callbacks.onAdCompleted(), 100);
+      });
+
+      await adManager.showRewardedAd(placement);
+
+      expect(preloadSpy).toHaveBeenCalledWith(placement);
+    });
+
+    it('should return error when ad is not ready', async () => {
+      const placement = 'pre-pulse-power';
+      mockMaxSdk.isRewardedAdReady.mockReturnValue(false);
+      jest.spyOn(adManager as any, 'preloadRewardedAd').mockResolvedValue(false);
+
+      const result = await adManager.showRewardedAd(placement);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('Ad not ready');
     });
   });
 
-  describe('loadRewardedAd', () => {
-    it('should load rewarded ad', async () => {
-      (AppLovinMAX.loadRewardedAd as jest.Mock).mockResolvedValue(true);
+  describe('optimizeAdPlacement', () => {
+    it('should calculate and set optimal ECPM', async () => {
+      const userSegment: UserSegment = {
+        tier: 'premium',
+        region: 'US',
+        ltv: 50.0,
+        engagementScore: 0.8,
+      };
 
-      await adManager.loadRewardedAd();
+      jest.spyOn(adManager as any, 'getUserSegment').mockResolvedValue(userSegment);
+      jest.spyOn(adManager as any, 'calculateOptimalECPM').mockResolvedValue(2.5);
 
-      expect(AppLovinMAX.loadRewardedAd).toHaveBeenCalledWith(mockRewardedAdUnitId);
+      await adManager.optimizeAdPlacement();
+
+      expect(mockMaxSdk.setTargetECPM).toHaveBeenCalledWith(2.5);
     });
 
-    it('should handle load failure', async () => {
-      (AppLovinMAX.loadRewardedAd as jest.Mock).mockRejectedValue(new Error('Load failed'));
+    it('should handle optimization failure gracefully', async () => {
+      jest.spyOn(adManager as any, 'getUserSegment').mockRejectedValue(new Error('Segment error'));
 
-      await expect(adManager.loadRewardedAd()).rejects.toThrow('Load failed');
-    });
-  });
-
-  describe('showInterstitialAd', () => {
-    it('should show interstitial ad when ready', async () => {
-      (AppLovinMAX.isInterstitialAdReady as jest.Mock).mockReturnValue(true);
-      (AppLovinMAX.showInterstitialAd as jest.Mock).mockResolvedValue(true);
-
-      const result = await adManager.showInterstitialAd();
-
-      expect(AppLovinMAX.showInterstitialAd).toHaveBeenCalledWith(mockInterstitialAdUnitId);
-      expect(result).toBe(true);
-    });
-
-    it('should return false when ad not ready', async () => {
-      (AppLovinMAX.isInterstitialAdReady as jest.Mock).mockReturnValue(false);
-
-      const result = await adManager.showInterstitialAd();
-
-      expect(AppLovinMAX.showInterstitialAd).not.toHaveBeenCalled();
-      expect(result).toBe(false);
+      await expect(adManager.optimizeAdPlacement()).rejects.toThrow('Segment error');
     });
   });
 
-  describe('getAdRevenue', () => {
-    it('should return accumulated revenue', () => {
-      const revenue = adManager.getAdRevenue();
+  describe('calculateOptimalECPM', () => {
+    it('should return higher ECPM for premium users', async () => {
+      const premiumSegment: UserSegment = {
+        tier: 'premium',
+        region: 'US',
+        ltv: 100.0,
+        engagementScore: 0.9,
+      };
+
+      const result = await (adManager as any).calculateOptimalECPM(premiumSegment);
+
+      expect(result).toBeGreaterThan(2.0);
+    });
+
+    it('should return lower ECPM for free users', async () => {
+      const freeSegment: UserSegment = {
+        tier: 'free',
+        region: 'US',
+        ltv: 5.0,
+        engagementScore: 0.3,
+      };
+
+      const result = await (adManager as any).calculateOptimalECPM(freeSegment);
+
+      expect(result).toBeLessThan(1.5);
+    });
+
+    it('should adjust ECPM based on region', async () => {
+      const usSegment: UserSegment = {
+        tier: 'standard',
+        region: 'US',
+        ltv: 25.0,
+        engagementScore: 0.6,
+      };
+
+      const inSegment: UserSegment = {
+        tier: 'standard',
+        region: 'IN',
+        ltv: 25.0,
+        engagementScore: 0.6,
+      };
+
+      const usECPM = await (adManager as any).calculateOptimalECPM(usSegment);
+      const inECPM = await (adManager as any).calculateOptimalECPM(inSegment);
+
+      expect(usECPM).toBeGreaterThan(inECPM);
+    });
+  });
+
+  describe('trackAdImpression', () => {
+    it('should increment impression counter', () => {
+      const placement = 'test-placement';
       
-      expect(typeof revenue).toBe('number');
-      expect(revenue).toBeGreaterThanOrEqual(0);
+      (adManager as any).trackAdImpression(placement);
+      (adManager as any).trackAdImpression(placement);
+
+      const metrics = adManager.getAdMetrics();
+      expect(metrics[placement]).toBe(2);
+    });
+
+    it('should track multiple placements separately', () => {
+      (adManager as any).trackAdImpression('placement-1');
+      (adManager as any).trackAdImpression('placement-2');
+      (adManager as any).trackAdImpression('placement-1');
+
+      const metrics = adManager.getAdMetrics();
+      expect(metrics['placement-1']).toBe(2);
+      expect(metrics['placement-2']).toBe(1);
+    });
+  });
+
+  describe('getRewardForPlacement', () => {
+    it('should return correct reward for pre-pulse placement', () => {
+      const reward = (adManager as any).getRewardForPlacement('pre-pulse-power');
+      expect(reward).toBe('double_power');
+    });
+
+    it('should return correct reward for post-pulse placement', () => {
+      const reward = (adManager as any).getRewardForPlacement('post-pulse-bonus');
+      expect(reward).toBe('bonus_points');
+    });
+
+    it('should return standard reward for unknown placement', () => {
+      const reward = (adManager as any).getRewardForPlacement('unknown-placement');
+      expect(reward).toBe('standard_reward');
     });
   });
 });

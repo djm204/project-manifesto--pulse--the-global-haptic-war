@@ -1,121 +1,159 @@
 import { SyncService } from '../../src/services/SyncService';
-import io from 'socket.io-client';
+import { Socket } from 'socket.io-client';
+import { PulseEvent, SyncStatus } from '../../src/types/pulse';
 
 // Mock socket.io-client
-jest.mock('socket.io-client');
+jest.mock('socket.io-client', () => ({
+  io: jest.fn(() => mockSocket),
+}));
+
+const mockSocket = {
+  emit: jest.fn(),
+  on: jest.fn(),
+  off: jest.fn(),
+  connect: jest.fn(),
+  disconnect: jest.fn(),
+  connected: true,
+} as unknown as Socket;
 
 describe('SyncService', () => {
   let syncService: SyncService;
-  let mockSocket: any;
 
   beforeEach(() => {
-    mockSocket = {
-      connect: jest.fn(),
-      disconnect: jest.fn(),
-      on: jest.fn(),
-      off: jest.fn(),
-      emit: jest.fn(),
-      connected: false,
-    };
-    
-    (io as jest.Mock).mockReturnValue(mockSocket);
-    syncService = new SyncService('ws://test-server:3000');
+    jest.clearAllMocks();
+    syncService = new SyncService();
+    (syncService as any).socket = mockSocket;
   });
 
   afterEach(() => {
-    jest.clearAllMocks();
+    jest.restoreAllMocks();
   });
 
-  describe('connect', () => {
-    it('should establish WebSocket connection', async () => {
-      mockSocket.connected = true;
-      mockSocket.connect.mockImplementation(() => {
-        mockSocket.connected = true;
-      });
-
-      await syncService.connect();
-
-      expect(mockSocket.connect).toHaveBeenCalled();
-      expect(mockSocket.on).toHaveBeenCalledWith('connect', expect.any(Function));
-      expect(mockSocket.on).toHaveBeenCalledWith('disconnect', expect.any(Function));
-      expect(mockSocket.on).toHaveBeenCalledWith('pulse-sync', expect.any(Function));
-    });
-
-    it('should handle connection failure', async () => {
-      mockSocket.connect.mockImplementation(() => {
-        throw new Error('Connection failed');
-      });
-
-      await expect(syncService.connect()).rejects.toThrow('Connection failed');
-    });
-  });
-
-  describe('disconnect', () => {
-    it('should close WebSocket connection', () => {
-      syncService.disconnect();
-
-      expect(mockSocket.disconnect).toHaveBeenCalled();
-    });
-  });
-
-  describe('syncTime', () => {
-    it('should synchronize time with server', async () => {
-      const mockServerTime = Date.now();
-      mockSocket.emit.mockImplementation((event, callback) => {
-        if (event === 'time-sync') {
-          callback({ serverTime: mockServerTime });
-        }
-      });
-
-      const result = await syncService.syncTime();
-
-      expect(mockSocket.emit).toHaveBeenCalledWith('time-sync', expect.any(Function));
-      expect(result).toBeCloseTo(mockServerTime, -2); // Within 100ms
-    });
-
-    it('should handle sync timeout', async () => {
-      mockSocket.emit.mockImplementation(() => {
-        // Simulate timeout - don't call callback
-      });
-
-      await expect(syncService.syncTime()).rejects.toThrow('Time sync timeout');
-    });
-  });
-
-  describe('joinPulse', () => {
-    it('should join pulse session', async () => {
-      const pulseId = 'pulse-123';
+  describe('synchronizeWithGlobalClock', () => {
+    it('should calculate correct NTP offset', async () => {
+      const mockNTPTime = 1640995200000;
+      const mockCurrentTime = 1640995199500;
       
-      await syncService.joinPulse(pulseId);
+      jest.spyOn(Date, 'now').mockReturnValue(mockCurrentTime);
+      jest.spyOn(syncService as any, 'getNTPTime').mockResolvedValue(mockNTPTime);
 
-      expect(mockSocket.emit).toHaveBeenCalledWith('join-pulse', { pulseId });
+      await syncService.synchronizeWithGlobalClock();
+
+      expect((syncService as any).ntpOffset).toBe(500);
+    });
+
+    it('should handle NTP sync failure gracefully', async () => {
+      jest.spyOn(syncService as any, 'getNTPTime').mockRejectedValue(new Error('NTP failed'));
+
+      await expect(syncService.synchronizeWithGlobalClock()).rejects.toThrow('NTP failed');
+    });
+
+    it('should retry NTP sync on failure', async () => {
+      const getNTPTimeSpy = jest.spyOn(syncService as any, 'getNTPTime')
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockResolvedValue(1640995200000);
+
+      await syncService.synchronizeWithGlobalClock();
+
+      expect(getNTPTimeSpy).toHaveBeenCalledTimes(2);
     });
   });
 
-  describe('submitPulse', () => {
-    it('should submit pulse data', async () => {
-      const pulseData = {
-        timestamp: Date.now(),
-        pattern: 'tap' as const,
+  describe('joinPulseEvent', () => {
+    it('should emit join-pulse with correct user data', async () => {
+      const userId = 'test-user-123';
+      const mockPulseEvent: PulseEvent = {
+        id: 'pulse-1',
+        timestamp: 1640995200000,
+        participants: 100,
         intensity: 0.8,
-        userId: 'user-123',
       };
 
-      await syncService.submitPulse(pulseData);
+      jest.spyOn(syncService as any, 'getUserId').mockResolvedValue(userId);
+      mockSocket.emit = jest.fn().mockImplementation((event, data, callback) => {
+        if (callback) callback(mockPulseEvent);
+        return mockSocket;
+      });
 
-      expect(mockSocket.emit).toHaveBeenCalledWith('pulse-submit', pulseData);
+      const result = await syncService.joinPulseEvent();
+
+      expect(mockSocket.emit).toHaveBeenCalledWith('join-pulse', {
+        userId,
+        timezone: expect.any(String),
+      }, expect.any(Function));
+      expect(result).toEqual(mockPulseEvent);
+    });
+
+    it('should handle socket connection failure', async () => {
+      (mockSocket as any).connected = false;
+
+      await expect(syncService.joinPulseEvent()).rejects.toThrow('Socket not connected');
+    });
+
+    it('should validate user timezone format', async () => {
+      const userId = 'test-user-123';
+      jest.spyOn(syncService as any, 'getUserId').mockResolvedValue(userId);
+      
+      await syncService.joinPulseEvent();
+
+      const emitCall = (mockSocket.emit as jest.Mock).mock.calls[0];
+      const timezone = emitCall[1].timezone;
+      expect(timezone).toMatch(/^[A-Za-z_]+\/[A-Za-z_]+$/);
     });
   });
 
-  describe('isConnected', () => {
-    it('should return connection status', () => {
-      mockSocket.connected = true;
-      
-      expect(syncService.isConnected()).toBe(true);
-      
-      mockSocket.connected = false;
-      
-      expect(syncService.isConnected()).toBe(false);
+  describe('getSynchronizedTime', () => {
+    it('should return adjusted time with NTP offset', () => {
+      (syncService as any).ntpOffset = 1000;
+      const mockTime = 1640995200000;
+      jest.spyOn(Date, 'now').mockReturnValue(mockTime);
+
+      const result = syncService.getSynchronizedTime();
+
+      expect(result).toBe(mockTime + 1000);
+    });
+
+    it('should return current time when no offset available', () => {
+      (syncService as any).ntpOffset = 0;
+      const mockTime = 1640995200000;
+      jest.spyOn(Date, 'now').mockReturnValue(mockTime);
+
+      const result = syncService.getSynchronizedTime();
+
+      expect(result).toBe(mockTime);
+    });
+  });
+
+  describe('leavePulseEvent', () => {
+    it('should emit leave-pulse event', async () => {
+      const userId = 'test-user-123';
+      jest.spyOn(syncService as any, 'getUserId').mockResolvedValue(userId);
+
+      await syncService.leavePulseEvent();
+
+      expect(mockSocket.emit).toHaveBeenCalledWith('leave-pulse', { userId });
+    });
+  });
+
+  describe('getConnectionStatus', () => {
+    it('should return connected status', () => {
+      (mockSocket as any).connected = true;
+
+      const status = syncService.getConnectionStatus();
+
+      expect(status).toEqual({
+        connected: true,
+        ntpSynced: false,
+        lastSync: null,
+      });
+    });
+
+    it('should return disconnected status', () => {
+      (mockSocket as any).connected = false;
+
+      const status = syncService.getConnectionStatus();
+
+      expect(status.connected).toBe(false);
     });
   });
 });
