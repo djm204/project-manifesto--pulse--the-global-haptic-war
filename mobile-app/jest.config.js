@@ -1,12 +1,12 @@
 module.exports = {
   preset: 'react-native',
   setupFilesAfterEnv: ['<rootDir>/__tests__/setup.ts'],
-  testMatch: ['**/__tests__/**/*.test.ts', '**/__tests__/**/*.test.tsx'],
+  testMatch: ['**/__tests__/**/*.test.(ts|tsx|js)'],
   collectCoverageFrom: [
     'src/**/*.{ts,tsx}',
     '!src/**/*.d.ts',
-    '!src/types/**/*',
-    '!src/assets/**/*',
+    '!src/**/__tests__/**',
+    '!src/types/**',
   ],
   coverageThreshold: {
     global: {
@@ -16,10 +16,10 @@ module.exports = {
       statements: 80,
     },
   },
+  transformIgnorePatterns: [
+    'node_modules/(?!(react-native|@react-native|react-native-haptic-feedback|socket.io-client)/)',
+  ],
   moduleNameMapping: {
     '^@/(.*)$': '<rootDir>/src/$1',
   },
-  transformIgnorePatterns: [
-    'node_modules/(?!(react-native|@react-native|react-native-haptic-feedback|react-native-keychain)/)',
-  ],
 };
