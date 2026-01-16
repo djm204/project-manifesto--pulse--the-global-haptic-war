@@ -1,98 +1,138 @@
 import { AdManager } from '../../src/services/AdManager';
-import { AdPlacement, AdReward } from '../../src/types/ads';
+import { AdReward, AdType } from '../../src/types/ads';
 
 // Mock AppLovin MAX SDK
-const mockMAX = {
+const mockAppLovinMAX = {
   initialize: jest.fn(),
-  showRewardedAd: jest.fn(),
-  showInterstitial: jest.fn(),
   loadRewardedAd: jest.fn(),
+  showRewardedAd: jest.fn(),
+  loadInterstitialAd: jest.fn(),
+  showInterstitialAd: jest.fn(),
   isRewardedAdReady: jest.fn(),
-  setRewardedAdListener: jest.fn(),
+  isInterstitialAdReady: jest.fn(),
 };
 
-jest.mock('react-native-applovin-max', () => mockMAX);
+jest.mock('react-native-applovin-max', () => mockAppLovinMAX);
 
 describe('AdManager', () => {
   let adManager: AdManager;
 
   beforeEach(() => {
-    adManager = new AdManager();
     jest.clearAllMocks();
+    adManager = new AdManager();
   });
 
-  describe('initializeAds', () => {
+  describe('initialization', () => {
     it('should initialize AppLovin MAX SDK', async () => {
-      mockMAX.initialize.mockResolvedValue(true);
-      
-      await adManager.initializeAds();
-      
-      expect(mockMAX.initialize).toHaveBeenCalledWith(expect.any(String));
+      mockAppLovinMAX.initialize.mockResolvedValue(true);
+
+      await adManager.initialize('test-sdk-key');
+
+      expect(mockAppLovinMAX.initialize).toHaveBeenCalledWith('test-sdk-key');
     });
 
     it('should handle initialization failure', async () => {
-      mockMAX.initialize.mockRejectedValue(new Error('SDK init failed'));
-      
-      await expect(adManager.initializeAds()).rejects.toThrow('SDK init failed');
+      mockAppLovinMAX.initialize.mockRejectedValue(new Error('Init failed'));
+
+      await expect(adManager.initialize('invalid-key')).rejects.toThrow('Init failed');
     });
   });
 
-  describe('showRewardedAd', () => {
-    it('should show rewarded ad and return reward', async () => {
-      const mockReward: AdReward = {
-        amount: 100,
-        currency: 'coins',
-        placement: AdPlacement.PRE_PULSE,
-      };
-
-      mockMAX.showRewardedAd.mockImplementation((placement, callbacks) => {
+  describe('showRewardedVideo', () => {
+    it('should resolve with reward when ad completes successfully', async () => {
+      const mockReward: AdReward = { type: 'power-up', value: 2, currency: 'pulse-coins' };
+      mockAppLovinMAX.isRewardedAdReady.mockReturnValue(true);
+      mockAppLovinMAX.showRewardedAd.mockImplementation((callbacks) => {
         setTimeout(() => callbacks.onReward(mockReward), 100);
         return Promise.resolve();
       });
 
-      const reward = await adManager.showRewardedAd(AdPlacement.PRE_PULSE);
-      
-      expect(reward).toEqual(mockReward);
-      expect(mockMAX.showRewardedAd).toHaveBeenCalledWith(
-        AdPlacement.PRE_PULSE,
-        expect.objectContaining({
-          onReward: expect.any(Function),
-          onError: expect.any(Function),
-        })
-      );
+      const result = await adManager.showRewardedVideo();
+
+      expect(result).toEqual(mockReward);
+      expect(mockAppLovinMAX.showRewardedAd).toHaveBeenCalled();
     });
 
-    it('should handle ad show failure', async () => {
-      const error = new Error('Ad failed to show');
-      mockMAX.showRewardedAd.mockImplementation((placement, callbacks) => {
-        setTimeout(() => callbacks.onError(error), 100);
+    it('should reject when ad is not ready', async () => {
+      mockAppLovinMAX.isRewardedAdReady.mockReturnValue(false);
+
+      await expect(adManager.showRewardedVideo()).rejects.toThrow('Rewarded ad not ready');
+    });
+
+    it('should handle ad display errors', async () => {
+      mockAppLovinMAX.isRewardedAdReady.mockReturnValue(true);
+      mockAppLovinMAX.showRewardedAd.mockImplementation((callbacks) => {
+        setTimeout(() => callbacks.onError({ code: 'AD_DISPLAY_FAILED', message: 'Display failed' }), 100);
         return Promise.resolve();
       });
 
-      await expect(
-        adManager.showRewardedAd(AdPlacement.PRE_PULSE)
-      ).rejects.toThrow('Ad failed to show');
+      await expect(adManager.showRewardedVideo()).rejects.toThrow('Display failed');
+    });
+
+    it('should track ad interactions', async () => {
+      const mockReward: AdReward = { type: 'power-up', value: 1, currency: 'pulse-coins' };
+      const trackSpy = jest.spyOn(adManager as any, 'trackAdInteraction');
+      mockAppLovinMAX.isRewardedAdReady.mockReturnValue(true);
+      mockAppLovinMAX.showRewardedAd.mockImplementation((callbacks) => {
+        callbacks.onReward(mockReward);
+        callbacks.onClose();
+        return Promise.resolve();
+      });
+
+      await adManager.showRewardedVideo();
+
+      expect(trackSpy).toHaveBeenCalledWith('rewarded_complete', expect.any(Object));
+      expect(trackSpy).toHaveBeenCalledWith('rewarded_close');
+    });
+  });
+
+  describe('showInterstitial', () => {
+    it('should show interstitial ad successfully', async () => {
+      mockAppLovinMAX.isInterstitialAdReady.mockReturnValue(true);
+      mockAppLovinMAX.showInterstitialAd.mockResolvedValue(undefined);
+
+      await expect(adManager.showInterstitial('post-pulse-playable')).resolves.toBeUndefined();
+      expect(mockAppLovinMAX.showInterstitialAd).toHaveBeenCalledWith('post-pulse-playable');
+    });
+
+    it('should handle interstitial not ready', async () => {
+      mockAppLovinMAX.isInterstitialAdReady.mockReturnValue(false);
+
+      await expect(adManager.showInterstitial('test-ad')).rejects.toThrow('Interstitial ad not ready');
     });
   });
 
   describe('preloadAds', () => {
-    it('should preload ads for all placements', async () => {
-      mockMAX.loadRewardedAd.mockResolvedValue(true);
-      
+    it('should preload rewarded and interstitial ads', async () => {
+      mockAppLovinMAX.loadRewardedAd.mockResolvedValue(true);
+      mockAppLovinMAX.loadInterstitialAd.mockResolvedValue(true);
+
       await adManager.preloadAds();
-      
-      expect(mockMAX.loadRewardedAd).toHaveBeenCalledTimes(3); // PRE_PULSE, POST_PULSE, LEADERBOARD
+
+      expect(mockAppLovinMAX.loadRewardedAd).toHaveBeenCalledWith('pulse-power-up');
+      expect(mockAppLovinMAX.loadInterstitialAd).toHaveBeenCalledWith('post-pulse-playable');
+    });
+
+    it('should handle preload failures gracefully', async () => {
+      mockAppLovinMAX.loadRewardedAd.mockRejectedValue(new Error('Load failed'));
+      mockAppLovinMAX.loadInterstitialAd.mockResolvedValue(true);
+
+      await expect(adManager.preloadAds()).resolves.toBeUndefined();
+      expect(mockAppLovinMAX.loadInterstitialAd).toHaveBeenCalled();
     });
   });
 
-  describe('isAdReady', () => {
-    it('should return ad readiness status', () => {
-      mockMAX.isRewardedAdReady.mockReturnValue(true);
-      
-      const isReady = adManager.isAdReady(AdPlacement.PRE_PULSE);
-      
-      expect(isReady).toBe(true);
-      expect(mockMAX.isRewardedAdReady).toHaveBeenCalledWith(AdPlacement.PRE_PULSE);
+  describe('getAdAvailability', () => {
+    it('should return correct availability status', () => {
+      mockAppLovinMAX.isRewardedAdReady.mockReturnValue(true);
+      mockAppLovinMAX.isInterstitialAdReady.mockReturnValue(false);
+
+      const availability = adManager.getAdAvailability();
+
+      expect(availability).toEqual({
+        rewarded: true,
+        interstitial: false
+      });
     });
   });
 });
