@@ -1,37 +1,24 @@
 import 'react-native-gesture-handler/jestSetup';
-import '@testing-library/jest-native/extend-expect';
+import mockAsyncStorage from '@react-native-async-storage/async-storage/jest/async-storage-mock';
 
-// Mock react-native modules
-jest.mock('react-native', () => {
-  const RN = jest.requireActual('react-native');
-  return {
-    ...RN,
-    Platform: {
-      ...RN.Platform,
-      OS: 'ios',
-      select: jest.fn((obj) => obj.ios),
-    },
-  };
-});
+jest.mock('@react-native-async-storage/async-storage', () => mockAsyncStorage);
 
-// Mock AsyncStorage
-jest.mock('@react-native-async-storage/async-storage', () =>
-  require('@react-native-async-storage/async-storage/jest/async-storage-mock')
-);
-
-// Mock Keychain
 jest.mock('react-native-keychain', () => ({
   setInternetCredentials: jest.fn(() => Promise.resolve()),
-  getInternetCredentials: jest.fn(() => Promise.resolve({ username: 'user', password: 'encrypted_data' })),
+  getInternetCredentials: jest.fn(() => Promise.resolve({ username: 'test', password: 'test' })),
   resetInternetCredentials: jest.fn(() => Promise.resolve()),
 }));
 
-// Mock Haptic Feedback
 jest.mock('react-native-haptic-feedback', () => ({
   trigger: jest.fn(),
+  HapticFeedbackTypes: {
+    impactLight: 'impactLight',
+    impactMedium: 'impactMedium',
+    impactHeavy: 'impactHeavy',
+    selection: 'selection',
+  },
 }));
 
-// Mock Socket.io
 jest.mock('socket.io-client', () => ({
   io: jest.fn(() => ({
     connect: jest.fn(),
@@ -42,21 +29,4 @@ jest.mock('socket.io-client', () => ({
   })),
 }));
 
-// Mock Encrypted Storage
-jest.mock('react-native-encrypted-storage', () => ({
-  setItem: jest.fn(() => Promise.resolve()),
-  getItem: jest.fn(() => Promise.resolve('encrypted_value')),
-  removeItem: jest.fn(() => Promise.resolve()),
-  clear: jest.fn(() => Promise.resolve()),
-}));
-
-// Mock Device Info
-jest.mock('react-native-device-info', () => ({
-  getUniqueId: jest.fn(() => Promise.resolve('test-device-id')),
-  getSystemName: jest.fn(() => 'iOS'),
-  getSystemVersion: jest.fn(() => '15.0'),
-  getModel: jest.fn(() => 'iPhone'),
-}));
-
-// Global test timeout
-jest.setTimeout(10000);
+global.__DEV__ = false;
