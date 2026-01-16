@@ -1,206 +1,169 @@
 import { AppLovinMAX } from 'react-native-applovin-max';
 import { Platform } from 'react-native';
-import { SecurityService } from './SecurityService';
+
+export interface AdConfig {
+  sdkKey: string;
+  rewardedAdUnitId: string;
+  interstitialAdUnitId: string;
+  bannerAdUnitId: string;
+}
 
 export interface AdReward {
-  type: 'power_multiplier' | 'extra_pulse' | 'premium_access';
-  value: number;
-  duration: number;
-  timestamp: number;
+  type: 'rewarded_video' | 'interstitial';
+  amount: number;
+  currency: string;
+  adId: string;
 }
 
-export interface AdPlacement {
-  id: string;
-  name: string;
-  type: 'rewarded' | 'interstitial' | 'banner';
-}
-
-export class AdManager {
-  private static instance: AdManager;
+class AdManager {
   private isInitialized: boolean = false;
-  private adUnits: Record<string, string> = {};
+  private config: AdConfig;
+  private rewardedAdLoaded: boolean = false;
+  private interstitialAdLoaded: boolean = false;
 
-  private constructor() {
-    this.initializeAdUnits();
-  }
-
-  static getInstance(): AdManager {
-    if (!AdManager.instance) {
-      AdManager.instance = new AdManager();
-    }
-    return AdManager.instance;
-  }
-
-  private initializeAdUnits(): void {
-    if (Platform.OS === 'ios') {
-      this.adUnits = {
-        rewarded: 'YOUR_IOS_REWARDED_AD_UNIT_ID',
-        interstitial: 'YOUR_IOS_INTERSTITIAL_AD_UNIT_ID',
-        banner: 'YOUR_IOS_BANNER_AD_UNIT_ID'
-      };
-    } else {
-      this.adUnits = {
-        rewarded: 'YOUR_ANDROID_REWARDED_AD_UNIT_ID',
-        interstitial: 'YOUR_ANDROID_INTERSTITIAL_AD_UNIT_ID',
-        banner: 'YOUR_ANDROID_BANNER_AD_UNIT_ID'
-      };
-    }
+  constructor() {
+    this.config = {
+      sdkKey: Platform.select({
+        ios: process.env.EXPO_PUBLIC_APPLOVIN_SDK_KEY_IOS || '',
+        android: process.env.EXPO_PUBLIC_APPLOVIN_SDK_KEY_ANDROID || '',
+      }) || '',
+      rewardedAdUnitId: Platform.select({
+        ios: process.env.EXPO_PUBLIC_REWARDED_AD_UNIT_ID_IOS || '',
+        android: process.env.EXPO_PUBLIC_REWARDED_AD_UNIT_ID_ANDROID || '',
+      }) || '',
+      interstitialAdUnitId: Platform.select({
+        ios: process.env.EXPO_PUBLIC_INTERSTITIAL_AD_UNIT_ID_IOS || '',
+        android: process.env.EXPO_PUBLIC_INTERSTITIAL_AD_UNIT_ID_ANDROID || '',
+      }) || '',
+      bannerAdUnitId: Platform.select({
+        ios: process.env.EXPO_PUBLIC_BANNER_AD_UNIT_ID_IOS || '',
+        android: process.env.EXPO_PUBLIC_BANNER_AD_UNIT_ID_ANDROID || '',
+      }) || '',
+    };
   }
 
   async initialize(): Promise<void> {
-    try {
-      const sdkKey = Platform.OS === 'ios' 
-        ? 'YOUR_IOS_SDK_KEY'
-        : 'YOUR_ANDROID_SDK_KEY';
+    if (this.isInitialized) return;
 
-      await AppLovinMAX.initialize(sdkKey);
+    try {
+      await AppLovinMAX.initialize(this.config.sdkKey);
       
-      // Set privacy settings
-      await this.setPrivacySettings();
+      // Set up ad event listeners
+      this.setupEventListeners();
       
-      // Load ads
+      // Preload ads
       await this.preloadAds();
       
       this.isInitialized = true;
-      console.log('AdManager initialized successfully');
     } catch (error) {
-      console.error('AdManager initialization failed:', error);
-      throw new Error('Ad SDK initialization failed');
-    }
-  }
-
-  private async setPrivacySettings(): Promise<void> {
-    const hasConsent = await SecurityService.getUserConsent();
-    const isAgeRestricted = await SecurityService.isUserAgeRestricted();
-    
-    AppLovinMAX.setHasUserConsent(hasConsent);
-    AppLovinMAX.setIsAgeRestrictedUser(isAgeRestricted);
-    AppLovinMAX.setDoNotSell(!hasConsent);
-  }
-
-  private async preloadAds(): Promise<void> {
-    try {
-      await Promise.all([
-        AppLovinMAX.loadRewardedAd(this.adUnits.rewarded),
-        AppLovinMAX.loadInterstitial(this.adUnits.interstitial)
-      ]);
-    } catch (error) {
-      console.error('Failed to preload ads:', error);
-    }
-  }
-
-  async showRewardedVideo(placement: string): Promise<AdReward> {
-    if (!this.isInitialized) {
-      throw new Error('AdManager not initialized');
-    }
-
-    try {
-      const isReady = await AppLovinMAX.isRewardedAdReady(this.adUnits.rewarded);
-      
-      if (!isReady) {
-        await AppLovinMAX.loadRewardedAd(this.adUnits.rewarded);
-        throw new Error('No rewarded ad available');
-      }
-
-      const result = await AppLovinMAX.showRewardedAd(this.adUnits.rewarded);
-      
-      if (result.didRewardUser) {
-        const reward: AdReward = {
-          type: this.getRewardType(placement),
-          value: this.getRewardValue(placement),
-          duration: this.getRewardDuration(placement),
-          timestamp: Date.now()
-        };
-
-        // Track ad completion
-        this.trackAdCompletion('rewarded', placement, true);
-        
-        // Preload next ad
-        AppLovinMAX.loadRewardedAd(this.adUnits.rewarded);
-        
-        return reward;
-      } else {
-        throw new Error('User did not complete ad');
-      }
-    } catch (error) {
-      this.trackAdCompletion('rewarded', placement, false);
-      console.error('Rewarded video error:', error);
+      console.error('Failed to initialize AdManager:', error);
       throw error;
     }
   }
 
-  async showInterstitial(placement: string): Promise<void> {
-    if (!this.isInitialized) {
-      throw new Error('AdManager not initialized');
-    }
+  private setupEventListeners(): void {
+    // Rewarded ad events
+    AppLovinMAX.addEventListener('OnRewardedAdLoadedEvent', () => {
+      this.rewardedAdLoaded = true;
+    });
 
+    AppLovinMAX.addEventListener('OnRewardedAdLoadFailedEvent', (error) => {
+      console.error('Rewarded ad failed to load:', error);
+      this.rewardedAdLoaded = false;
+    });
+
+    AppLovinMAX.addEventListener('OnRewardedAdDisplayedEvent', () => {
+      console.log('Rewarded ad displayed');
+    });
+
+    AppLovinMAX.addEventListener('OnRewardedAdHiddenEvent', () => {
+      console.log('Rewarded ad hidden');
+      this.rewardedAdLoaded = false;
+      this.loadRewardedAd(); // Preload next ad
+    });
+
+    // Interstitial ad events
+    AppLovinMAX.addEventListener('OnInterstitialLoadedEvent', () => {
+      this.interstitialAdLoaded = true;
+    });
+
+    AppLovinMAX.addEventListener('OnInterstitialLoadFailedEvent', (error) => {
+      console.error('Interstitial ad failed to load:', error);
+      this.interstitialAdLoaded = false;
+    });
+
+    AppLovinMAX.addEventListener('OnInterstitialHiddenEvent', () => {
+      this.interstitialAdLoaded = false;
+      this.loadInterstitialAd(); // Preload next ad
+    });
+  }
+
+  private async preloadAds(): Promise<void> {
+    await Promise.all([
+      this.loadRewardedAd(),
+      this.loadInterstitialAd(),
+    ]);
+  }
+
+  async loadRewardedAd(): Promise<void> {
     try {
-      const isReady = await AppLovinMAX.isInterstitialReady(this.adUnits.interstitial);
-      
-      if (isReady) {
-        await AppLovinMAX.showInterstitial(this.adUnits.interstitial);
-        this.trackAdCompletion('interstitial', placement, true);
-        
-        // Preload next ad
-        AppLovinMAX.loadInterstitial(this.adUnits.interstitial);
-      }
+      await AppLovinMAX.loadRewardedAd(this.config.rewardedAdUnitId);
     } catch (error) {
-      this.trackAdCompletion('interstitial', placement, false);
-      console.error('Interstitial ad error:', error);
+      console.error('Failed to load rewarded ad:', error);
     }
   }
 
-  private getRewardType(placement: string): AdReward['type'] {
-    switch (placement) {
-      case 'pre_pulse':
-        return 'power_multiplier';
-      case 'post_pulse':
-        return 'extra_pulse';
-      case 'premium_unlock':
-        return 'premium_access';
-      default:
-        return 'power_multiplier';
+  async loadInterstitialAd(): Promise<void> {
+    try {
+      await AppLovinMAX.loadInterstitial(this.config.interstitialAdUnitId);
+    } catch (error) {
+      console.error('Failed to load interstitial ad:', error);
     }
   }
 
-  private getRewardValue(placement: string): number {
-    switch (placement) {
-      case 'pre_pulse':
-        return 2.0; // 2x multiplier
-      case 'post_pulse':
-        return 1.0; // 1 extra pulse
-      case 'premium_unlock':
-        return 1.0; // Premium access
-      default:
-        return 1.5;
+  async showRewardedAd(): Promise<AdReward | null> {
+    if (!this.isInitialized || !this.rewardedAdLoaded) {
+      throw new Error('Rewarded ad not ready');
     }
+
+    return new Promise((resolve, reject) => {
+      const rewardListener = (reward: any) => {
+        AppLovinMAX.removeEventListener('OnRewardedAdReceivedRewardEvent', rewardListener);
+        resolve({
+          type: 'rewarded_video',
+          amount: reward.amount || 100,
+          currency: reward.label || 'coins',
+          adId: `reward_${Date.now()}`,
+        });
+      };
+
+      const errorListener = (error: any) => {
+        AppLovinMAX.removeEventListener('OnRewardedAdFailedToDisplayEvent', errorListener);
+        reject(new Error(`Failed to show rewarded ad: ${error.message}`));
+      };
+
+      AppLovinMAX.addEventListener('OnRewardedAdReceivedRewardEvent', rewardListener);
+      AppLovinMAX.addEventListener('OnRewardedAdFailedToDisplayEvent', errorListener);
+
+      AppLovinMAX.showRewardedAd(this.config.rewardedAdUnitId);
+    });
   }
 
-  private getRewardDuration(placement: string): number {
-    switch (placement) {
-      case 'pre_pulse':
-        return 300000; // 5 minutes
-      case 'post_pulse':
-        return 0; // Instant
-      case 'premium_unlock':
-        return 86400000; // 24 hours
-      default:
-        return 300000;
+  async showInterstitialAd(): Promise<void> {
+    if (!this.isInitialized || !this.interstitialAdLoaded) {
+      throw new Error('Interstitial ad not ready');
     }
+
+    await AppLovinMAX.showInterstitial(this.config.interstitialAdUnitId);
   }
 
-  private trackAdCompletion(type: string, placement: string, success: boolean): void {
-    // Analytics tracking would go here
-    console.log(`Ad completion: ${type} - ${placement} - ${success ? 'success' : 'failed'}`);
+  isRewardedAdReady(): boolean {
+    return this.isInitialized && this.rewardedAdLoaded;
   }
 
-  async isRewardedAdReady(): Promise<boolean> {
-    if (!this.isInitialized) return false;
-    return AppLovinMAX.isRewardedAdReady(this.adUnits.rewarded);
-  }
-
-  async isInterstitialReady(): Promise<boolean> {
-    if (!this.isInitialized) return false;
-    return AppLovinMAX.isInterstitialReady(this.adUnits.interstitial);
+  isInterstitialAdReady(): boolean {
+    return this.isInitialized && this.interstitialAdLoaded;
   }
 }
+
+export default new AdManager();
