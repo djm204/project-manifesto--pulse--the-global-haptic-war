@@ -1,189 +1,136 @@
-import { Socket, io } from 'socket.io-client';
-import { EventEmitter } from 'events';
-import { PulseEvent, SyncStatus, NTPResponse } from '../types/pulse';
+import { io, Socket } from 'socket.io-client';
+import { HapticService } from './HapticService';
 import { SecurityService } from './SecurityService';
-import { validateInput } from '../utils/validation';
+import { API_BASE_URL } from '../utils/constants';
 
-export class SyncService extends EventEmitter {
+export interface PulseEvent {
+  id: string;
+  timestamp: number;
+  participants: number;
+  type: 'global' | 'regional';
+}
+
+export class SyncService {
+  private static instance: SyncService;
   private socket: Socket | null = null;
   private ntpOffset: number = 0;
-  private syncStatus: SyncStatus = 'disconnected';
+  private isConnected: boolean = false;
   private reconnectAttempts: number = 0;
   private maxReconnectAttempts: number = 5;
-  private securityService: SecurityService;
-  private heartbeatInterval: NodeJS.Timeout | null = null;
 
-  constructor() {
-    super();
-    this.securityService = new SecurityService();
+  private constructor() {}
+
+  static getInstance(): SyncService {
+    if (!SyncService.instance) {
+      SyncService.instance = new SyncService();
+    }
+    return SyncService.instance;
   }
 
-  async initialize(): Promise<void> {
+  async connect(): Promise<void> {
     try {
-      const serverUrl = process.env.REACT_APP_PULSE_SERVER_URL;
-      if (!serverUrl) {
-        throw new Error('PULSE_SERVER_URL not configured');
-      }
-
-      validateInput(serverUrl, 'url');
+      const token = await SecurityService.getSecureToken();
       
-      this.socket = io(serverUrl, {
+      this.socket = io(API_BASE_URL, {
+        auth: { token },
         transports: ['websocket'],
-        secure: true,
-        timeout: 5000,
-        forceNew: true
+        timeout: 10000,
+        reconnection: true,
+        reconnectionDelay: 1000,
+        reconnectionDelayMax: 5000,
+        maxReconnectionAttempts: this.maxReconnectAttempts
       });
 
       this.setupSocketListeners();
-      await this.synchronizeWithGlobalClock();
-      this.startHeartbeat();
+      await this.synchronizeWithServer();
     } catch (error) {
-      this.emit('error', error);
-      throw error;
+      console.error('Failed to connect to sync service:', error);
+      throw new Error('Sync service connection failed');
     }
-  }
-
-  async synchronizeWithGlobalClock(): Promise<void> {
-    try {
-      const ntpTime = await this.getNTPTime();
-      const localTime = Date.now();
-      this.ntpOffset = ntpTime - localTime;
-      
-      if (Math.abs(this.ntpOffset) > 1000) {
-        console.warn(`Large time offset detected: ${this.ntpOffset}ms`);
-      }
-      
-      this.emit('sync-updated', { offset: this.ntpOffset });
-    } catch (error) {
-      console.error('NTP synchronization failed:', error);
-      this.ntpOffset = 0;
-    }
-  }
-
-  async joinPulseEvent(): Promise<PulseEvent> {
-    if (!this.socket || this.syncStatus !== 'connected') {
-      throw new Error('Not connected to pulse server');
-    }
-
-    const userId = await this.securityService.getUserId();
-    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error('Join pulse timeout'));
-      }, 10000);
-
-      this.socket!.emit('join-pulse', {
-        userId,
-        timezone,
-        timestamp: this.getNetworkTime()
-      }, (response: PulseEvent | { error: string }) => {
-        clearTimeout(timeout);
-        
-        if ('error' in response) {
-          reject(new Error(response.error));
-        } else {
-          resolve(response);
-        }
-      });
-    });
-  }
-
-  getNetworkTime(): number {
-    return Date.now() + this.ntpOffset;
-  }
-
-  private async getNTPTime(): Promise<number> {
-    const ntpServers = [
-      'pool.ntp.org',
-      'time.cloudflare.com',
-      'time.google.com'
-    ];
-
-    for (const server of ntpServers) {
-      try {
-        const response = await fetch(`https://${server}/api/time`, {
-          method: 'GET',
-          timeout: 3000
-        });
-        
-        if (response.ok) {
-          const data: NTPResponse = await response.json();
-          return data.timestamp;
-        }
-      } catch (error) {
-        console.warn(`NTP server ${server} failed:`, error);
-      }
-    }
-
-    // Fallback to local time if all NTP servers fail
-    return Date.now();
   }
 
   private setupSocketListeners(): void {
     if (!this.socket) return;
 
     this.socket.on('connect', () => {
-      this.syncStatus = 'connected';
+      this.isConnected = true;
       this.reconnectAttempts = 0;
-      this.emit('connected');
+      console.log('Connected to sync service');
     });
 
     this.socket.on('disconnect', () => {
-      this.syncStatus = 'disconnected';
-      this.emit('disconnected');
-      this.handleReconnect();
+      this.isConnected = false;
+      console.log('Disconnected from sync service');
     });
 
-    this.socket.on('pulse-event', (event: PulseEvent) => {
-      this.emit('pulse-event', event);
+    this.socket.on('pulse_event', (event: PulseEvent) => {
+      this.handlePulseEvent(event);
     });
 
-    this.socket.on('sync-update', async () => {
-      await this.synchronizeWithGlobalClock();
-    });
-
-    this.socket.on('error', (error: Error) => {
-      console.error('Socket error:', error);
-      this.emit('error', error);
+    this.socket.on('connect_error', (error) => {
+      this.reconnectAttempts++;
+      console.error(`Connection error (attempt ${this.reconnectAttempts}):`, error);
     });
   }
 
-  private handleReconnect(): void {
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      this.emit('max-reconnect-attempts');
+  async synchronizeWithServer(): Promise<void> {
+    try {
+      const clientTime = Date.now();
+      const response = await fetch(`${API_BASE_URL}/api/time`);
+      const { serverTime } = await response.json();
+      
+      this.ntpOffset = serverTime - clientTime;
+      console.log(`Time synchronized. Offset: ${this.ntpOffset}ms`);
+    } catch (error) {
+      console.error('Time synchronization failed:', error);
+      throw new Error('Time synchronization failed');
+    }
+  }
+
+  getGlobalTime(): number {
+    return Date.now() + this.ntpOffset;
+  }
+
+  scheduleGlobalPulse(timestamp: number): void {
+    const delay = timestamp - this.getGlobalTime();
+    
+    if (delay <= 0) {
+      this.triggerPulse();
       return;
     }
 
-    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
-    this.reconnectAttempts++;
-
     setTimeout(() => {
-      if (this.socket && this.syncStatus === 'disconnected') {
-        this.socket.connect();
-      }
+      this.triggerPulse();
     }, delay);
   }
 
-  private startHeartbeat(): void {
-    this.heartbeatInterval = setInterval(() => {
-      if (this.socket && this.syncStatus === 'connected') {
-        this.socket.emit('heartbeat', { timestamp: this.getNetworkTime() });
-      }
-    }, 30000);
+  private triggerPulse(): void {
+    HapticService.triggerPulse();
+    this.emitPulseEvent();
+  }
+
+  private emitPulseEvent(): void {
+    if (this.socket && this.isConnected) {
+      this.socket.emit('user_pulse', {
+        timestamp: this.getGlobalTime(),
+        userId: SecurityService.getUserId()
+      });
+    }
+  }
+
+  private handlePulseEvent(event: PulseEvent): void {
+    this.scheduleGlobalPulse(event.timestamp);
   }
 
   disconnect(): void {
-    if (this.heartbeatInterval) {
-      clearInterval(this.heartbeatInterval);
-      this.heartbeatInterval = null;
-    }
-
     if (this.socket) {
       this.socket.disconnect();
       this.socket = null;
+      this.isConnected = false;
     }
+  }
 
-    this.syncStatus = 'disconnected';
+  isSocketConnected(): boolean {
+    return this.isConnected;
   }
 }
