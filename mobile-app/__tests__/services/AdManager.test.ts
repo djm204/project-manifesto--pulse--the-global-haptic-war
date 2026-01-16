@@ -1,15 +1,17 @@
 import { AdManager } from '../../src/services/AdManager';
-import { AdReward, AdError } from '../../src/types/ads';
+import { AdPlacement, AdReward } from '../../src/types/ads';
 
 // Mock AppLovin MAX SDK
-jest.mock('react-native-applovin-max', () => ({
-  AppLovinMAX: {
-    showRewardedVideo: jest.fn(),
-    loadRewardedVideo: jest.fn(),
-    isRewardedVideoReady: jest.fn(),
-    setRewardedVideoListener: jest.fn(),
-  },
-}));
+const mockMAX = {
+  initialize: jest.fn(),
+  showRewardedAd: jest.fn(),
+  showInterstitial: jest.fn(),
+  loadRewardedAd: jest.fn(),
+  isRewardedAdReady: jest.fn(),
+  setRewardedAdListener: jest.fn(),
+};
+
+jest.mock('react-native-applovin-max', () => mockMAX);
 
 describe('AdManager', () => {
   let adManager: AdManager;
@@ -19,78 +21,78 @@ describe('AdManager', () => {
     jest.clearAllMocks();
   });
 
-  describe('showRewardedAdForPowerUp', () => {
-    it('should return power-up reward when ad is completed', async () => {
-      const mockAdResult = { completed: true, reward: 'powerup' };
-      (adManager as any).maxSdk.showRewardedVideo = jest.fn().mockResolvedValue(mockAdResult);
-
-      const reward = await adManager.showRewardedAdForPowerUp();
-
-      expect(reward).toEqual({
-        powerMultiplier: 2.0,
-        hapticIntensity: 'strong',
-        scoreBonus: 1.5,
-      });
-    });
-
-    it('should throw AdError when ad is not completed', async () => {
-      const mockAdResult = { completed: false };
-      (adManager as any).maxSdk.showRewardedVideo = jest.fn().mockResolvedValue(mockAdResult);
-
-      await expect(adManager.showRewardedAdForPowerUp()).rejects.toThrow(AdError);
-    });
-
-    it('should include correct placement and user data', async () => {
-      const mockUserId = 'user123';
-      jest.spyOn(adManager as any, 'getCurrentUserId').mockReturnValue(mockUserId);
-      jest.spyOn(adManager as any, 'getContextualSignals').mockReturnValue({ level: 5 });
+  describe('initializeAds', () => {
+    it('should initialize AppLovin MAX SDK', async () => {
+      mockMAX.initialize.mockResolvedValue(true);
       
-      const mockAdResult = { completed: true };
-      const showAdSpy = jest.spyOn((adManager as any).maxSdk, 'showRewardedVideo')
-        .mockResolvedValue(mockAdResult);
+      await adManager.initializeAds();
+      
+      expect(mockMAX.initialize).toHaveBeenCalledWith(expect.any(String));
+    });
 
-      await adManager.showRewardedAdForPowerUp();
-
-      expect(showAdSpy).toHaveBeenCalledWith({
-        placement: 'pre_pulse_powerup',
-        userId: mockUserId,
-        contextualData: { level: 5 },
-      });
+    it('should handle initialization failure', async () => {
+      mockMAX.initialize.mockRejectedValue(new Error('SDK init failed'));
+      
+      await expect(adManager.initializeAds()).rejects.toThrow('SDK init failed');
     });
   });
 
-  describe('loadRewardedAd', () => {
-    it('should load rewarded ad successfully', async () => {
-      (adManager as any).maxSdk.loadRewardedVideo = jest.fn().mockResolvedValue(true);
+  describe('showRewardedAd', () => {
+    it('should show rewarded ad and return reward', async () => {
+      const mockReward: AdReward = {
+        amount: 100,
+        currency: 'coins',
+        placement: AdPlacement.PRE_PULSE,
+      };
 
-      const result = await adManager.loadRewardedAd();
+      mockMAX.showRewardedAd.mockImplementation((placement, callbacks) => {
+        setTimeout(() => callbacks.onReward(mockReward), 100);
+        return Promise.resolve();
+      });
 
-      expect(result).toBe(true);
-      expect((adManager as any).maxSdk.loadRewardedVideo).toHaveBeenCalled();
+      const reward = await adManager.showRewardedAd(AdPlacement.PRE_PULSE);
+      
+      expect(reward).toEqual(mockReward);
+      expect(mockMAX.showRewardedAd).toHaveBeenCalledWith(
+        AdPlacement.PRE_PULSE,
+        expect.objectContaining({
+          onReward: expect.any(Function),
+          onError: expect.any(Function),
+        })
+      );
     });
 
-    it('should handle ad loading failure', async () => {
-      (adManager as any).maxSdk.loadRewardedVideo = jest.fn().mockRejectedValue(new Error('Network error'));
+    it('should handle ad show failure', async () => {
+      const error = new Error('Ad failed to show');
+      mockMAX.showRewardedAd.mockImplementation((placement, callbacks) => {
+        setTimeout(() => callbacks.onError(error), 100);
+        return Promise.resolve();
+      });
 
-      await expect(adManager.loadRewardedAd()).rejects.toThrow('Network error');
+      await expect(
+        adManager.showRewardedAd(AdPlacement.PRE_PULSE)
+      ).rejects.toThrow('Ad failed to show');
+    });
+  });
+
+  describe('preloadAds', () => {
+    it('should preload ads for all placements', async () => {
+      mockMAX.loadRewardedAd.mockResolvedValue(true);
+      
+      await adManager.preloadAds();
+      
+      expect(mockMAX.loadRewardedAd).toHaveBeenCalledTimes(3); // PRE_PULSE, POST_PULSE, LEADERBOARD
     });
   });
 
   describe('isAdReady', () => {
-    it('should return true when ad is ready', () => {
-      (adManager as any).maxSdk.isRewardedVideoReady = jest.fn().mockReturnValue(true);
-
-      const result = adManager.isAdReady();
-
-      expect(result).toBe(true);
-    });
-
-    it('should return false when ad is not ready', () => {
-      (adManager as any).maxSdk.isRewardedVideoReady = jest.fn().mockReturnValue(false);
-
-      const result = adManager.isAdReady();
-
-      expect(result).toBe(false);
+    it('should return ad readiness status', () => {
+      mockMAX.isRewardedAdReady.mockReturnValue(true);
+      
+      const isReady = adManager.isAdReady(AdPlacement.PRE_PULSE);
+      
+      expect(isReady).toBe(true);
+      expect(mockMAX.isRewardedAdReady).toHaveBeenCalledWith(AdPlacement.PRE_PULSE);
     });
   });
 });

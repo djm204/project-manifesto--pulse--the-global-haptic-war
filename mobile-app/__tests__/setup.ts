@@ -1,44 +1,8 @@
 import 'react-native-gesture-handler/jestSetup';
 import mockAsyncStorage from '@react-native-async-storage/async-storage/jest/async-storage-mock';
 
-// Mock AsyncStorage
 jest.mock('@react-native-async-storage/async-storage', () => mockAsyncStorage);
 
-// Mock react-native modules
-jest.mock('react-native', () => {
-  const RN = jest.requireActual('react-native');
-  return {
-    ...RN,
-    Vibration: {
-      vibrate: jest.fn(),
-      cancel: jest.fn(),
-    },
-    Platform: {
-      OS: 'ios',
-      select: jest.fn((obj) => obj.ios),
-    },
-    Dimensions: {
-      get: jest.fn(() => ({ width: 375, height: 812 })),
-    },
-    Alert: {
-      alert: jest.fn(),
-    },
-  };
-});
-
-// Mock socket.io-client
-jest.mock('socket.io-client', () => ({
-  io: jest.fn(() => ({
-    connect: jest.fn(),
-    disconnect: jest.fn(),
-    on: jest.fn(),
-    off: jest.fn(),
-    emit: jest.fn(),
-    connected: true,
-  })),
-}));
-
-// Mock Haptic feedback
 jest.mock('react-native-haptic-feedback', () => ({
   trigger: jest.fn(),
   HapticFeedbackTypes: {
@@ -48,9 +12,20 @@ jest.mock('react-native-haptic-feedback', () => ({
   },
 }));
 
-// Global test timeout
-jest.setTimeout(10000);
+jest.mock('socket.io-client', () => ({
+  io: jest.fn(() => ({
+    on: jest.fn(),
+    emit: jest.fn(),
+    disconnect: jest.fn(),
+    connected: true,
+  })),
+}));
 
-// Suppress console warnings in tests
-console.warn = jest.fn();
-console.error = jest.fn();
+jest.mock('react-native-encrypted-storage', () => ({
+  setItem: jest.fn(() => Promise.resolve()),
+  getItem: jest.fn(() => Promise.resolve(null)),
+  removeItem: jest.fn(() => Promise.resolve()),
+  clear: jest.fn(() => Promise.resolve()),
+}));
+
+global.__DEV__ = true;
