@@ -1,181 +1,170 @@
 import CryptoJS from 'crypto-js';
-import Keychain from 'react-native-keychain';
-import EncryptedStorage from 'react-native-encrypted-storage';
-import { validateInput } from '../utils/validation';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { PIIData, UserConsent, SanitizedUserData, UserData } from '../types/user';
+import { validateEmail, validatePhoneNumber } from '../utils/validation';
 
 export class SecurityService {
-  private static instance: SecurityService;
-  private encryptionKey: string | null = null;
+  private readonly encryptionKey: string;
+  private readonly keyDerivationSalt: string;
 
-  private constructor() {}
-
-  public static getInstance(): SecurityService {
-    if (!SecurityService.instance) {
-      SecurityService.instance = new SecurityService();
-    }
-    return SecurityService.instance;
+  constructor() {
+    this.encryptionKey = this.deriveEncryptionKey();
+    this.keyDerivationSalt = 'global-pulse-salt-2024';
   }
 
-  /**
-   * Initialize security service with device-specific encryption key
-   */
-  public async initialize(): Promise<void> {
+  private deriveEncryptionKey(): string {
+    const deviceId = this.getDeviceId();
+    return CryptoJS.PBKDF2(deviceId, this.keyDerivationSalt, {
+      keySize: 256/32,
+      iterations: 10000
+    }).toString();
+  }
+
+  private getDeviceId(): string {
+    // In production, use actual device ID
+    return process.env.DEVICE_ID || 'default-device-id';
+  }
+
+  async encryptPII(data: PIIData): Promise<string> {
     try {
-      const credentials = await Keychain.getInternetCredentials('global-pulse-key');
+      const jsonData = JSON.stringify(data);
+      const iv = CryptoJS.lib.WordArray.random(16);
       
-      if (credentials) {
-        this.encryptionKey = credentials.password;
-      } else {
-        // Generate new encryption key
-        this.encryptionKey = CryptoJS.lib.WordArray.random(256/8).toString();
-        await Keychain.setInternetCredentials(
-          'global-pulse-key',
-          'encryption-key',
-          this.encryptionKey
-        );
-      }
+      const encrypted = CryptoJS.AES.encrypt(jsonData, this.encryptionKey, {
+        iv: iv,
+        mode: CryptoJS.mode.CBC,
+        padding: CryptoJS.pad.Pkcs7
+      });
+
+      const result = {
+        iv: iv.toString(),
+        data: encrypted.toString()
+      };
+
+      return CryptoJS.enc.Base64.stringify(
+        CryptoJS.enc.Utf8.parse(JSON.stringify(result))
+      );
     } catch (error) {
-      throw new Error(`Failed to initialize security service: ${error}`);
+      console.error('PII encryption failed:', error);
+      throw new Error('Failed to encrypt sensitive data');
     }
   }
 
-  /**
-   * Encrypt sensitive data using AES-256
-   */
-  public encrypt(data: string): string {
-    if (!this.encryptionKey) {
-      throw new Error('Security service not initialized');
-    }
-
-    if (!validateInput.isString(data)) {
-      throw new Error('Invalid data type for encryption');
-    }
-
+  async decryptPII(encryptedData: string): Promise<PIIData> {
     try {
-      const encrypted = CryptoJS.AES.encrypt(data, this.encryptionKey).toString();
-      return encrypted;
+      const decoded = JSON.parse(
+        CryptoJS.enc.Utf8.stringify(CryptoJS.enc.Base64.parse(encryptedData))
+      );
+
+      const decrypted = CryptoJS.AES.decrypt(decoded.data, this.encryptionKey, {
+        iv: CryptoJS.enc.Hex.parse(decoded.iv),
+        mode: CryptoJS.mode.CBC,
+        padding: CryptoJS.pad.Pkcs7
+      });
+
+      const decryptedText = decrypted.toString(CryptoJS.enc.Utf8);
+      return JSON.parse(decryptedText);
     } catch (error) {
-      throw new Error(`Encryption failed: ${error}`);
+      console.error('PII decryption failed:', error);
+      throw new Error('Failed to decrypt sensitive data');
     }
   }
 
-  /**
-   * Decrypt sensitive data
-   */
-  public decrypt(encryptedData: string): string {
-    if (!this.encryptionKey) {
-      throw new Error('Security service not initialized');
-    }
-
-    if (!validateInput.isString(encryptedData)) {
-      throw new Error('Invalid encrypted data');
-    }
-
+  async validateDataConsent(userId: string): Promise<boolean> {
     try {
-      const decrypted = CryptoJS.AES.decrypt(encryptedData, this.encryptionKey);
-      return decrypted.toString(CryptoJS.enc.Utf8);
+      const consent = await this.getUserConsent(userId);
+      return consent.analytics && consent.advertising && consent.dataProcessing;
     } catch (error) {
-      throw new Error(`Decryption failed: ${error}`);
+      console.error('Consent validation failed:', error);
+      return false;
     }
   }
 
-  /**
-   * Store sensitive data securely
-   */
-  public async storeSecure(key: string, value: string): Promise<void> {
-    if (!validateInput.isString(key) || !validateInput.isString(value)) {
-      throw new Error('Invalid key or value for secure storage');
+  async getUserConsent(userId: string): Promise<UserConsent> {
+    const consentKey = `user_consent_${this.sanitizeUserId(userId)}`;
+    const consentData = await AsyncStorage.getItem(consentKey);
+    
+    if (!consentData) {
+      return {
+        analytics: false,
+        advertising: false,
+        dataProcessing: false,
+        timestamp: Date.now(),
+        version: '1.0'
+      };
     }
 
-    try {
-      const encryptedValue = this.encrypt(value);
-      await EncryptedStorage.setItem(key, encryptedValue);
-    } catch (error) {
-      throw new Error(`Failed to store secure data: ${error}`);
-    }
+    return JSON.parse(consentData);
   }
 
-  /**
-   * Retrieve sensitive data securely
-   */
-  public async getSecure(key: string): Promise<string | null> {
-    if (!validateInput.isString(key)) {
-      throw new Error('Invalid key for secure retrieval');
-    }
+  async updateConsent(userId: string, consent: Partial<UserConsent>): Promise<void> {
+    const currentConsent = await this.getUserConsent(userId);
+    const updatedConsent: UserConsent = {
+      ...currentConsent,
+      ...consent,
+      timestamp: Date.now(),
+      version: '1.0'
+    };
 
-    try {
-      const encryptedValue = await EncryptedStorage.getItem(key);
-      if (!encryptedValue) {
-        return null;
-      }
-      return this.decrypt(encryptedValue);
-    } catch (error) {
-      throw new Error(`Failed to retrieve secure data: ${error}`);
-    }
+    const consentKey = `user_consent_${this.sanitizeUserId(userId)}`;
+    await AsyncStorage.setItem(consentKey, JSON.stringify(updatedConsent));
   }
 
-  /**
-   * Remove sensitive data securely
-   */
-  public async removeSecure(key: string): Promise<void> {
-    if (!validateInput.isString(key)) {
-      throw new Error('Invalid key for secure removal');
-    }
-
-    try {
-      await EncryptedStorage.removeItem(key);
-    } catch (error) {
-      throw new Error(`Failed to remove secure data: ${error}`);
-    }
+  sanitizeUserData(userData: UserData): SanitizedUserData {
+    const { email, phoneNumber, fullName, ...sanitized } = userData;
+    
+    return {
+      ...sanitized,
+      emailHash: email ? CryptoJS.SHA256(email.toLowerCase()).toString() : undefined,
+      phoneHash: phoneNumber ? CryptoJS.SHA256(phoneNumber).toString() : undefined,
+      displayName: fullName ? this.maskName(fullName) : undefined
+    };
   }
 
-  /**
-   * Hash data using SHA-256
-   */
-  public hash(data: string): string {
-    if (!validateInput.isString(data)) {
-      throw new Error('Invalid data for hashing');
-    }
-
-    return CryptoJS.SHA256(data).toString();
+  sanitizeUserId(userId: string): string {
+    return userId.replace(/[^a-zA-Z0-9-_]/g, '');
   }
 
-  /**
-   * Generate secure random string
-   */
-  public generateSecureRandom(length: number = 32): string {
-    if (!validateInput.isPositiveInteger(length)) {
-      throw new Error('Invalid length for random generation');
+  private maskName(fullName: string): string {
+    const parts = fullName.split(' ');
+    if (parts.length === 1) {
+      return parts[0].charAt(0) + '*'.repeat(Math.max(0, parts[0].length - 1));
     }
-
-    return CryptoJS.lib.WordArray.random(length).toString();
+    
+    return parts.map((part, index) => {
+      if (index === 0) return part; // Keep first name
+      return part.charAt(0) + '*'.repeat(Math.max(0, part.length - 1));
+    }).join(' ');
   }
 
-  /**
-   * Sanitize input to prevent injection attacks
-   */
-  public sanitizeInput(input: string): string {
-    if (!validateInput.isString(input)) {
-      return '';
-    }
-
-    return input
-      .replace(/[<>]/g, '') // Remove HTML tags
-      .replace(/['"]/g, '') // Remove quotes
-      .replace(/[;&|`$]/g, '') // Remove command injection chars
-      .trim();
+  async getAuthToken(): Promise<string | null> {
+    return await AsyncStorage.getItem('auth_token');
   }
 
-  /**
-   * Clear all security data (for logout/reset)
-   */
-  public async clearAll(): Promise<void> {
-    try {
-      await Keychain.resetInternetCredentials('global-pulse-key');
-      await EncryptedStorage.clear();
-      this.encryptionKey = null;
-    } catch (error) {
-      throw new Error(`Failed to clear security data: ${error}`);
+  async setAuthToken(token: string): Promise<void> {
+    await AsyncStorage.setItem('auth_token', token);
+  }
+
+  async clearAuthData(): Promise<void> {
+    const keys = await AsyncStorage.getAllKeys();
+    const authKeys = keys.filter(key => 
+      key.startsWith('auth_') || 
+      key.startsWith('user_consent_') ||
+      key.startsWith('encrypted_')
+    );
+    
+    await AsyncStorage.multiRemove(authKeys);
+  }
+
+  validatePIIData(data: PIIData): boolean {
+    if (data.email && !validateEmail(data.email)) {
+      return false;
     }
+    
+    if (data.phoneNumber && !validatePhoneNumber(data.phoneNumber)) {
+      return false;
+    }
+    
+    return true;
   }
 }
