@@ -1,133 +1,210 @@
-import { io, Socket } from 'socket.io-client';
-import { ApiService } from './ApiService';
+import { WebSocket } from 'ws';
+import { EventEmitter } from 'events';
 import { SecurityService } from './SecurityService';
-import { PulseSession, SyncStatus } from '../types/pulse';
-import { validateUserId } from '../utils/validation';
+import { EncryptionService } from '../utils/encryption';
+import { ValidationError, ConnectionError } from '../types/errors';
 
-export class SyncService {
-  private socket: Socket | null = null;
-  private ntpOffset: number = 0;
-  private syncStatus: SyncStatus = 'disconnected';
-  private readonly apiService: ApiService;
-  private readonly securityService: SecurityService;
-  private reconnectAttempts: number = 0;
-  private readonly maxReconnectAttempts: number = 5;
+interface SyncMessage {
+  type: 'pulse' | 'leaderboard' | 'heartbeat';
+  payload: any;
+  timestamp: number;
+  userId: string;
+}
 
-  constructor(
-    apiService: ApiService,
-    securityService: SecurityService
-  ) {
-    this.apiService = apiService;
-    this.securityService = securityService;
+interface ConnectionConfig {
+  url: string;
+  maxRetries: number;
+  retryDelay: number;
+  heartbeatInterval: number;
+}
+
+export class SyncService extends EventEmitter {
+  private ws: WebSocket | null = null;
+  private reconnectAttempts = 0;
+  private heartbeatTimer: NodeJS.Timeout | null = null;
+  private messageQueue: SyncMessage[] = [];
+  private isConnected = false;
+
+  private readonly config: ConnectionConfig = {
+    url: process.env.WEBSOCKET_URL || 'wss://api.globalpulse.com/sync',
+    maxRetries: 5,
+    retryDelay: 1000,
+    heartbeatInterval: 30000
+  };
+
+  constructor() {
+    super();
+    this.setupConnectionHandlers();
   }
 
-  async connect(): Promise<void> {
-    if (this.socket?.connected) return;
+  async connect(userId: string, token: string): Promise<void> {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      return;
+    }
 
-    const token = await this.securityService.getAuthToken();
-    if (!token) throw new Error('Authentication required');
+    try {
+      // Validate authentication
+      await SecurityService.validateJWT(token);
+      
+      this.ws = new WebSocket(this.config.url, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'User-Agent': 'GlobalPulse/1.0'
+        }
+      });
 
-    this.socket = io(process.env.WEBSOCKET_URL!, {
-      auth: { token },
-      transports: ['websocket'],
-      timeout: 10000,
-    });
+      this.setupWebSocketHandlers(userId);
+      
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new ConnectionError('Connection timeout'));
+        }, 10000);
 
-    this.setupSocketListeners();
+        this.ws!.onopen = () => {
+          clearTimeout(timeout);
+          this.isConnected = true;
+          this.reconnectAttempts = 0;
+          this.startHeartbeat();
+          this.processMessageQueue();
+          this.emit('connected');
+          resolve();
+        };
+
+        this.ws!.onerror = (error) => {
+          clearTimeout(timeout);
+          reject(new ConnectionError(`Connection failed: ${error.message}`));
+        };
+      });
+    } catch (error) {
+      throw new ConnectionError(`Failed to establish connection: ${error.message}`);
+    }
   }
 
-  private setupSocketListeners(): void {
-    if (!this.socket) return;
+  async sendPulse(pulseData: any): Promise<void> {
+    const validatedData = SecurityService.validatePulseData(pulseData);
+    const encryptedData = await EncryptionService.encryptPII(JSON.stringify(validatedData));
+    
+    const message: SyncMessage = {
+      type: 'pulse',
+      payload: encryptedData,
+      timestamp: Date.now(),
+      userId: pulseData.userId
+    };
 
-    this.socket.on('connect', () => {
-      this.syncStatus = 'connected';
-      this.reconnectAttempts = 0;
-    });
+    await this.sendMessage(message);
+  }
 
-    this.socket.on('disconnect', () => {
-      this.syncStatus = 'disconnected';
-      this.handleReconnection();
-    });
+  async sendMessage(message: SyncMessage): Promise<void> {
+    if (!this.isConnected || this.ws?.readyState !== WebSocket.OPEN) {
+      this.messageQueue.push(message);
+      return;
+    }
 
-    this.socket.on('connect_error', (error) => {
-      console.error('Socket connection error:', error);
-      this.syncStatus = 'error';
+    try {
+      const serialized = JSON.stringify(message);
+      this.ws.send(serialized);
+    } catch (error) {
+      this.messageQueue.push(message);
+      throw new ConnectionError(`Failed to send message: ${error.message}`);
+    }
+  }
+
+  private setupWebSocketHandlers(userId: string): void {
+    if (!this.ws) return;
+
+    this.ws.onmessage = async (event) => {
+      try {
+        const message = JSON.parse(event.data) as SyncMessage;
+        await this.handleIncomingMessage(message);
+      } catch (error) {
+        console.error('Failed to process message:', error);
+      }
+    };
+
+    this.ws.onclose = () => {
+      this.isConnected = false;
+      this.stopHeartbeat();
+      this.emit('disconnected');
+      this.attemptReconnection(userId);
+    };
+
+    this.ws.onerror = (error) => {
+      console.error('WebSocket error:', error);
+      this.emit('error', error);
+    };
+  }
+
+  private async handleIncomingMessage(message: SyncMessage): Promise<void> {
+    switch (message.type) {
+      case 'pulse':
+        const decryptedData = await EncryptionService.decryptPII(message.payload);
+        this.emit('pulseUpdate', JSON.parse(decryptedData));
+        break;
+      case 'leaderboard':
+        this.emit('leaderboardUpdate', message.payload);
+        break;
+      case 'heartbeat':
+        // Acknowledge heartbeat
+        break;
+    }
+  }
+
+  private setupConnectionHandlers(): void {
+    this.on('error', (error) => {
+      console.error('Sync service error:', error);
     });
   }
 
-  private async handleReconnection(): Promise<void> {
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      this.syncStatus = 'failed';
+  private startHeartbeat(): void {
+    this.heartbeatTimer = setInterval(() => {
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({ type: 'heartbeat', timestamp: Date.now() }));
+      }
+    }, this.config.heartbeatInterval);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
+  private async attemptReconnection(userId: string): Promise<void> {
+    if (this.reconnectAttempts >= this.config.maxRetries) {
+      this.emit('maxRetriesReached');
       return;
     }
 
     this.reconnectAttempts++;
-    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
+    const delay = this.config.retryDelay * Math.pow(2, this.reconnectAttempts - 1);
     
-    setTimeout(() => {
-      this.connect().catch(console.error);
+    setTimeout(async () => {
+      try {
+        const token = await SecurityService.getStoredToken();
+        await this.connect(userId, token);
+      } catch (error) {
+        console.error('Reconnection attempt failed:', error);
+      }
     }, delay);
   }
 
-  async synchronizeTime(): Promise<void> {
-    try {
-      const start = Date.now();
-      const serverTime = await this.apiService.getServerTime();
-      const end = Date.now();
-      const networkDelay = (end - start) / 2;
-      
-      this.ntpOffset = serverTime - (start + networkDelay);
-      this.syncStatus = 'synchronized';
-    } catch (error) {
-      console.error('Time synchronization failed:', error);
-      throw new Error('Failed to synchronize time');
+  private processMessageQueue(): void {
+    while (this.messageQueue.length > 0 && this.isConnected) {
+      const message = this.messageQueue.shift();
+      if (message) {
+        this.sendMessage(message).catch(console.error);
+      }
     }
-  }
-
-  async joinGlobalPulse(userId: string): Promise<PulseSession> {
-    validateUserId(userId);
-    
-    if (!this.socket?.connected) {
-      await this.connect();
-    }
-
-    await this.synchronizeTime();
-
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error('Pulse join timeout'));
-      }, 15000);
-
-      this.socket!.emit('join-pulse', { 
-        userId: this.securityService.sanitizeUserId(userId),
-        timestamp: this.getSynchronizedTime()
-      });
-
-      this.socket!.once('pulse-session', (session: PulseSession) => {
-        clearTimeout(timeout);
-        resolve(session);
-      });
-
-      this.socket!.once('pulse-error', (error: Error) => {
-        clearTimeout(timeout);
-        reject(error);
-      });
-    });
-  }
-
-  getSynchronizedTime(): number {
-    return Date.now() + this.ntpOffset;
-  }
-
-  getSyncStatus(): SyncStatus {
-    return this.syncStatus;
   }
 
   disconnect(): void {
-    if (this.socket) {
-      this.socket.disconnect();
-      this.socket = null;
-      this.syncStatus = 'disconnected';
+    this.stopHeartbeat();
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
     }
+    this.isConnected = false;
+    this.messageQueue = [];
   }
 }
