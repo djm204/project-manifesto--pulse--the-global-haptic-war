@@ -1,0 +1,33 @@
+{
+  "name": "global-pulse",
+  "version": "1.0.0",
+  "description": "Real-time synchronized global pulse game",
+  "private": true,
+  "workspaces": [
+    "mobile-app",
+    "backend"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:mobile\" \"npm run dev:backend\"",
+    "dev:mobile": "cd mobile-app && npm run start",
+    "dev:backend": "cd backend && npm run dev",
+    "test": "npm run test:mobile && npm run test:backend",
+    "test:mobile": "cd mobile-app && npm test",
+    "test:backend": "cd backend && npm test",
+    "lint": "npm run lint:mobile && npm run lint:backend",
+    "lint:mobile": "cd mobile-app && npm run lint",
+    "lint:backend": "cd backend && npm run lint",
+    "build": "npm run build:mobile && npm run build:backend",
+    "build:mobile": "cd mobile-app && npm run build",
+    "build:backend": "cd backend && npm run build",
+    "prepare": "husky install"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.45.0",
+    "prettier": "^3.0.0",
+    "husky": "^8.0.3"
+  }
+}
