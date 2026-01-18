@@ -1,170 +1,181 @@
-import CryptoJS from 'crypto-js';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { PIIData, UserConsent, SanitizedUserData, UserData } from '../types/user';
-import { validateEmail, validatePhoneNumber } from '../utils/validation';
+import jwt from 'jsonwebtoken';
+import bcrypt from 'bcrypt';
+import crypto from 'crypto';
+import { AsyncStorage } from '@react-native-async-storage/async-storage';
+import { InputValidator } from '../utils/validation';
+import { EncryptionService } from '../utils/encryption';
+import { AuthenticationError, ValidationError } from '../types/errors';
+
+interface UserPayload {
+  userId: string;
+  username: string;
+  permissions: string[];
+  exp: number;
+}
+
+interface PulseData {
+  userId: string;
+  score: number;
+  timestamp: number;
+  deviceId: string;
+}
 
 export class SecurityService {
-  private readonly encryptionKey: string;
-  private readonly keyDerivationSalt: string;
+  private static readonly JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret';
+  private static readonly TOKEN_KEY = 'pulse_auth_token';
+  private static readonly SALT_ROUNDS = 12;
 
-  constructor() {
-    this.encryptionKey = this.deriveEncryptionKey();
-    this.keyDerivationSalt = 'global-pulse-salt-2024';
-  }
+  static async validateJWT(token: string): Promise<UserPayload> {
+    if (!token || typeof token !== 'string') {
+      throw new AuthenticationError('Token is required');
+    }
 
-  private deriveEncryptionKey(): string {
-    const deviceId = this.getDeviceId();
-    return CryptoJS.PBKDF2(deviceId, this.keyDerivationSalt, {
-      keySize: 256/32,
-      iterations: 10000
-    }).toString();
-  }
-
-  private getDeviceId(): string {
-    // In production, use actual device ID
-    return process.env.DEVICE_ID || 'default-device-id';
-  }
-
-  async encryptPII(data: PIIData): Promise<string> {
     try {
-      const jsonData = JSON.stringify(data);
-      const iv = CryptoJS.lib.WordArray.random(16);
+      const payload = jwt.verify(token, this.JWT_SECRET) as UserPayload;
       
-      const encrypted = CryptoJS.AES.encrypt(jsonData, this.encryptionKey, {
-        iv: iv,
-        mode: CryptoJS.mode.CBC,
-        padding: CryptoJS.pad.Pkcs7
-      });
+      // Check token expiration
+      if (payload.exp < Date.now() / 1000) {
+        throw new AuthenticationError('Token expired');
+      }
 
-      const result = {
-        iv: iv.toString(),
-        data: encrypted.toString()
-      };
-
-      return CryptoJS.enc.Base64.stringify(
-        CryptoJS.enc.Utf8.parse(JSON.stringify(result))
-      );
+      // Validate user permissions
+      await this.validateUserPermissions(payload.userId);
+      
+      return payload;
     } catch (error) {
-      console.error('PII encryption failed:', error);
-      throw new Error('Failed to encrypt sensitive data');
+      if (error instanceof jwt.JsonWebTokenError) {
+        throw new AuthenticationError('Invalid token signature');
+      }
+      throw error;
     }
   }
 
-  async decryptPII(encryptedData: string): Promise<PIIData> {
-    try {
-      const decoded = JSON.parse(
-        CryptoJS.enc.Utf8.stringify(CryptoJS.enc.Base64.parse(encryptedData))
-      );
+  static async validateUserPermissions(userId: string): Promise<void> {
+    // Validate userId format
+    if (!InputValidator.isValidUUID(userId)) {
+      throw new ValidationError('Invalid user ID format');
+    }
 
-      const decrypted = CryptoJS.AES.decrypt(decoded.data, this.encryptionKey, {
-        iv: CryptoJS.enc.Hex.parse(decoded.iv),
-        mode: CryptoJS.mode.CBC,
-        padding: CryptoJS.pad.Pkcs7
-      });
-
-      const decryptedText = decrypted.toString(CryptoJS.enc.Utf8);
-      return JSON.parse(decryptedText);
-    } catch (error) {
-      console.error('PII decryption failed:', error);
-      throw new Error('Failed to decrypt sensitive data');
+    // Check if user is active and has required permissions
+    // This would typically involve a database call
+    const userStatus = await this.getUserStatus(userId);
+    if (!userStatus.isActive) {
+      throw new AuthenticationError('User account is inactive');
     }
   }
 
-  async validateDataConsent(userId: string): Promise<boolean> {
-    try {
-      const consent = await this.getUserConsent(userId);
-      return consent.analytics && consent.advertising && consent.dataProcessing;
-    } catch (error) {
-      console.error('Consent validation failed:', error);
-      return false;
-    }
-  }
-
-  async getUserConsent(userId: string): Promise<UserConsent> {
-    const consentKey = `user_consent_${this.sanitizeUserId(userId)}`;
-    const consentData = await AsyncStorage.getItem(consentKey);
-    
-    if (!consentData) {
-      return {
-        analytics: false,
-        advertising: false,
-        dataProcessing: false,
-        timestamp: Date.now(),
-        version: '1.0'
-      };
+  static validatePulseData(data: any): PulseData {
+    if (!data || typeof data !== 'object') {
+      throw new ValidationError('Invalid pulse data format');
     }
 
-    return JSON.parse(consentData);
-  }
+    const { userId, score, timestamp, deviceId } = data;
 
-  async updateConsent(userId: string, consent: Partial<UserConsent>): Promise<void> {
-    const currentConsent = await this.getUserConsent(userId);
-    const updatedConsent: UserConsent = {
-      ...currentConsent,
-      ...consent,
-      timestamp: Date.now(),
-      version: '1.0'
-    };
+    // Validate userId
+    if (!InputValidator.isValidUUID(userId)) {
+      throw new ValidationError('Invalid user ID');
+    }
 
-    const consentKey = `user_consent_${this.sanitizeUserId(userId)}`;
-    await AsyncStorage.setItem(consentKey, JSON.stringify(updatedConsent));
-  }
+    // Validate score
+    const validatedScore = InputValidator.validatePulseScore(score);
+    if (!validatedScore.isValid) {
+      throw new ValidationError('Invalid pulse score');
+    }
 
-  sanitizeUserData(userData: UserData): SanitizedUserData {
-    const { email, phoneNumber, fullName, ...sanitized } = userData;
-    
+    // Validate timestamp (must be within last 5 minutes)
+    const now = Date.now();
+    if (!timestamp || timestamp > now || (now - timestamp) > 300000) {
+      throw new ValidationError('Invalid timestamp');
+    }
+
+    // Validate device ID
+    if (!InputValidator.isValidDeviceId(deviceId)) {
+      throw new ValidationError('Invalid device ID');
+    }
+
     return {
-      ...sanitized,
-      emailHash: email ? CryptoJS.SHA256(email.toLowerCase()).toString() : undefined,
-      phoneHash: phoneNumber ? CryptoJS.SHA256(phoneNumber).toString() : undefined,
-      displayName: fullName ? this.maskName(fullName) : undefined
+      userId: InputValidator.sanitizeString(userId),
+      score: validatedScore.sanitized,
+      timestamp,
+      deviceId: InputValidator.sanitizeString(deviceId)
     };
   }
 
-  sanitizeUserId(userId: string): string {
-    return userId.replace(/[^a-zA-Z0-9-_]/g, '');
-  }
-
-  private maskName(fullName: string): string {
-    const parts = fullName.split(' ');
-    if (parts.length === 1) {
-      return parts[0].charAt(0) + '*'.repeat(Math.max(0, parts[0].length - 1));
+  static async hashPassword(password: string): Promise<string> {
+    if (!password || password.length < 8) {
+      throw new ValidationError('Password must be at least 8 characters');
     }
-    
-    return parts.map((part, index) => {
-      if (index === 0) return part; // Keep first name
-      return part.charAt(0) + '*'.repeat(Math.max(0, part.length - 1));
-    }).join(' ');
+
+    const salt = await bcrypt.genSalt(this.SALT_ROUNDS);
+    return bcrypt.hash(password, salt);
   }
 
-  async getAuthToken(): Promise<string | null> {
-    return await AsyncStorage.getItem('auth_token');
-  }
-
-  async setAuthToken(token: string): Promise<void> {
-    await AsyncStorage.setItem('auth_token', token);
-  }
-
-  async clearAuthData(): Promise<void> {
-    const keys = await AsyncStorage.getAllKeys();
-    const authKeys = keys.filter(key => 
-      key.startsWith('auth_') || 
-      key.startsWith('user_consent_') ||
-      key.startsWith('encrypted_')
-    );
-    
-    await AsyncStorage.multiRemove(authKeys);
-  }
-
-  validatePIIData(data: PIIData): boolean {
-    if (data.email && !validateEmail(data.email)) {
+  static async verifyPassword(password: string, hash: string): Promise<boolean> {
+    try {
+      return await bcrypt.compare(password, hash);
+    } catch (error) {
       return false;
     }
-    
-    if (data.phoneNumber && !validatePhoneNumber(data.phoneNumber)) {
+  }
+
+  static async storeToken(token: string): Promise<void> {
+    try {
+      const encryptedToken = await EncryptionService.encryptPII(token);
+      await AsyncStorage.setItem(this.TOKEN_KEY, JSON.stringify(encryptedToken));
+    } catch (error) {
+      throw new Error('Failed to store authentication token');
+    }
+  }
+
+  static async getStoredToken(): Promise<string> {
+    try {
+      const encryptedData = await AsyncStorage.getItem(this.TOKEN_KEY);
+      if (!encryptedData) {
+        throw new AuthenticationError('No stored token found');
+      }
+
+      const parsedData = JSON.parse(encryptedData);
+      return await EncryptionService.decryptPII(parsedData);
+    } catch (error) {
+      throw new AuthenticationError('Failed to retrieve stored token');
+    }
+  }
+
+  static async clearStoredToken(): Promise<void> {
+    try {
+      await AsyncStorage.removeItem(this.TOKEN_KEY);
+    } catch (error) {
+      console.error('Failed to clear stored token:', error);
+    }
+  }
+
+  static generateCSRFToken(): string {
+    return crypto.randomBytes(32).toString('hex');
+  }
+
+  static validateCSRFToken(token: string, storedToken: string): boolean {
+    if (!token || !storedToken) {
       return false;
     }
-    
-    return true;
+    return crypto.timingSafeEqual(Buffer.from(token), Buffer.from(storedToken));
+  }
+
+  private static async getUserStatus(userId: string): Promise<{ isActive: boolean }> {
+    // Mock implementation - would be replaced with actual API call
+    return { isActive: true };
+  }
+
+  static async auditSecurityEvent(event: string, userId: string, metadata: any = {}): Promise<void> {
+    const auditLog = {
+      event,
+      userId,
+      timestamp: new Date().toISOString(),
+      metadata,
+      ip: metadata.ip || 'unknown',
+      userAgent: metadata.userAgent || 'unknown'
+    };
+
+    // In production, this would send to a security monitoring service
+    console.log('Security audit:', auditLog);
   }
 }
